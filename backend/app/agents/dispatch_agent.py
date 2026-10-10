@@ -1,41 +1,14 @@
-import os
-import json
-from dotenv import load_dotenv
+from app.config import MOCK_MODE, gemini_model, resource_node, request_node
 from app.optimizer.router import DistrictRouter
 from app.optimizer.constraints import ConstraintEngine
 
-load_dotenv()
-
-MOCK_MODE = True
 
 class DispatchAgent:
     def __init__(self, router: DistrictRouter, resources: list):
         self.router = router
         self.resources = resources
         self.constraints = ConstraintEngine()
-        
-        if not MOCK_MODE:
-            import vertexai
-            from vertexai.generative_models import GenerativeModel
-            vertexai.init(
-                project=os.getenv("GOOGLE_CLOUD_PROJECT", "resourceworkflow"),
-                location="us-central1"
-            )
-            self.model = GenerativeModel("gemini-2.0-flash")
-
-    def _get_resource_node(self, resource: dict) -> str:
-        loc = resource.get("location", "")
-        location_map = {
-            "Central_Depot": "N01",
-            "Zone_A_Dock": "N11",
-            "Zone_B_Dock": "N12",
-            "Zone_C_Dock": "N12",
-            "Zone_B_Community_Hall": "N08",
-            "Zone_A_School": "N07",
-            "Zone_C_School": "N07",
-            "Central_Sports_Complex": "N01"
-        }
-        return location_map.get(loc, "N01")
+        self.model = None if MOCK_MODE else gemini_model()
 
     def create_plan(self, requests: list) -> dict:
         # Sort by urgency and vulnerability
@@ -58,7 +31,7 @@ class DispatchAgent:
         unassigned = []
 
         for req in sorted_requests:
-            req_node = req.get("node_id", "N04")
+            req_node = request_node(req)
             best = None
             best_score = -999
 
@@ -70,7 +43,7 @@ class DispatchAgent:
                 if not validation["valid"]:
                     continue
 
-                res_node = self._get_resource_node(resource)
+                res_node = resource_node(resource)
                 route = self.router.shortest_path(res_node, req_node)
 
                 if route.get("blocked"):

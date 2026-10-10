@@ -1,9 +1,16 @@
-fastapi
-uvicorn
-google-cloud-firestore
-google-generativeai
-google-cloud-aiplatform
-python-dotenv
-firebase-admin
-pydantic
-streamlit
+# RescueIQ API service (what the Cloud Run container installs).
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+python-dotenv>=1.0
+
+# Google Cloud. Only exercised when MOCK_MODE=false.
+google-cloud-firestore>=2.16
+google-genai>=1.0
+firebase-admin>=6.5
+
+# Used by test_api.py.
+httpx>=0.27
+
+# The legacy Streamlit prototype (backend/app.py) additionally needs:
+#   pip install streamlit

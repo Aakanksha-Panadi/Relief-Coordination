@@ -1,35 +1,228 @@
 {
   "graph_id": "district_main",
-  "description": "SYNTHETIC road graph for a fictional flood-hit district. Coordinates are plausible but invented. Bridge Road (N09__N10) is the edge closed in the replanning demo.",
+  "description": "SYNTHETIC road graph for a fictional flood-hit district. Coordinates are plausible but invented. Bridge Road (N09__N10) is the edge closed in the replanning demo; every node has at least two connections so a closure forces a reroute rather than an unreachable destination.",
   "nodes": {
-    "N01": {"node_id": "N01", "name": "District Control Room", "kind": "depot", "lat": 13.0100, "lng": 80.2400},
-    "N02": {"node_id": "N02", "name": "Ward 1 Riverside", "kind": "ward", "lat": 13.0040, "lng": 80.2600},
-    "N03": {"node_id": "N03", "name": "Ward 3 Temple Street", "kind": "ward", "lat": 13.0140, "lng": 80.2520},
-    "N04": {"node_id": "N04", "name": "Ward 5 Market Road", "kind": "ward", "lat": 13.0000, "lng": 80.2480},
-    "N05": {"node_id": "N05", "name": "Ward 7 Old Town", "kind": "ward", "lat": 13.0200, "lng": 80.2660},
-    "N06": {"node_id": "N06", "name": "Ward 9 Hospital Junction", "kind": "hospital", "lat": 13.0090, "lng": 80.2470},
-    "N07": {"node_id": "N07", "name": "Govt School (shelter site)", "kind": "shelter", "lat": 13.0160, "lng": 80.2440},
-    "N08": {"node_id": "N08", "name": "Community Hall (shelter site)", "kind": "shelter", "lat": 13.0020, "lng": 80.2560},
-    "N09": {"node_id": "N09", "name": "Bridge Road East End", "kind": "bridge", "lat": 13.0150, "lng": 80.2580},
-    "N10": {"node_id": "N10", "name": "Bridge Road West End", "kind": "bridge", "lat": 13.0130, "lng": 80.2490},
-    "N11": {"node_id": "N11", "name": "Boat Jetty A (Riverside)", "kind": "jetty", "lat": 13.0060, "lng": 80.2620},
-    "N12": {"node_id": "N12", "name": "Boat Jetty B (East Bank)", "kind": "jetty", "lat": 13.0190, "lng": 80.2610}
+    "N01": {
+      "node_id": "N01",
+      "name": "District Control Room",
+      "kind": "depot",
+      "lat": 13.01,
+      "lng": 80.24
+    },
+    "N02": {
+      "node_id": "N02",
+      "name": "Ward 1 Riverside",
+      "kind": "ward",
+      "lat": 13.004,
+      "lng": 80.26
+    },
+    "N03": {
+      "node_id": "N03",
+      "name": "Ward 3 Temple Street",
+      "kind": "ward",
+      "lat": 13.014,
+      "lng": 80.252
+    },
+    "N04": {
+      "node_id": "N04",
+      "name": "Ward 5 Market Road",
+      "kind": "ward",
+      "lat": 13.0,
+      "lng": 80.248
+    },
+    "N05": {
+      "node_id": "N05",
+      "name": "Ward 7 Old Town",
+      "kind": "ward",
+      "lat": 13.02,
+      "lng": 80.266
+    },
+    "N06": {
+      "node_id": "N06",
+      "name": "Ward 9 Hospital Junction",
+      "kind": "hospital",
+      "lat": 13.009,
+      "lng": 80.247
+    },
+    "N07": {
+      "node_id": "N07",
+      "name": "Govt School (shelter site)",
+      "kind": "shelter",
+      "lat": 13.016,
+      "lng": 80.244
+    },
+    "N08": {
+      "node_id": "N08",
+      "name": "Community Hall (shelter site)",
+      "kind": "shelter",
+      "lat": 13.002,
+      "lng": 80.256
+    },
+    "N09": {
+      "node_id": "N09",
+      "name": "Bridge Road East End",
+      "kind": "bridge",
+      "lat": 13.015,
+      "lng": 80.258
+    },
+    "N10": {
+      "node_id": "N10",
+      "name": "Bridge Road West End",
+      "kind": "bridge",
+      "lat": 13.013,
+      "lng": 80.249
+    },
+    "N11": {
+      "node_id": "N11",
+      "name": "Boat Jetty A (Riverside)",
+      "kind": "jetty",
+      "lat": 13.006,
+      "lng": 80.262
+    },
+    "N12": {
+      "node_id": "N12",
+      "name": "Boat Jetty B (East Bank)",
+      "kind": "jetty",
+      "lat": 13.019,
+      "lng": 80.261
+    }
   },
   "edges": {
-    "N01__N10": {"edge_id": "N01__N10", "a": "N01", "b": "N10", "minutes": 4, "name": "Station Road", "closed": false},
-    "N01__N07": {"edge_id": "N01__N07", "a": "N01", "b": "N07", "minutes": 4, "name": "School Lane", "closed": false},
-    "N01__N06": {"edge_id": "N01__N06", "a": "N01", "b": "N06", "minutes": 3, "name": "Hospital Road", "closed": false},
-    "N06__N10": {"edge_id": "N06__N10", "a": "N06", "b": "N10", "minutes": 2, "name": "Hospital Road", "closed": false},
-    "N03__N10": {"edge_id": "N03__N10", "a": "N03", "b": "N10", "minutes": 3, "name": "Temple Street", "closed": false},
-    "N03__N07": {"edge_id": "N03__N07", "a": "N03", "b": "N07", "minutes": 3, "name": "Temple Street", "closed": false},
-    "N09__N10": {"edge_id": "N09__N10", "a": "N10", "b": "N09", "minutes": 5, "name": "Bridge Road", "closed": false},
-    "N05__N09": {"edge_id": "N05__N09", "a": "N09", "b": "N05", "minutes": 4, "name": "Old Town Road", "closed": false},
-    "N09__N12": {"edge_id": "N09__N12", "a": "N09", "b": "N12", "minutes": 3, "name": "East Bank Road", "closed": false},
-    "N02__N09": {"edge_id": "N02__N09", "a": "N09", "b": "N02", "minutes": 6, "name": "Riverside Drive", "closed": false},
-    "N02__N11": {"edge_id": "N02__N11", "a": "N11", "b": "N02", "minutes": 2, "name": "Riverside Drive", "closed": false},
-    "N02__N08": {"edge_id": "N02__N08", "a": "N08", "b": "N02", "minutes": 4, "name": "Hall Road", "closed": false},
-    "N04__N08": {"edge_id": "N04__N08", "a": "N08", "b": "N04", "minutes": 5, "name": "Market Road", "closed": false},
-    "N04__N06": {"edge_id": "N04__N06", "a": "N06", "b": "N04", "minutes": 4, "name": "Market Road", "closed": false},
-    "N08__N11": {"edge_id": "N08__N11", "a": "N11", "b": "N08", "minutes": 5, "name": "Jetty Road", "closed": false}
+    "N01__N10": {
+      "edge_id": "N01__N10",
+      "a": "N01",
+      "b": "N10",
+      "minutes": 4,
+      "name": "Station Road",
+      "closed": false
+    },
+    "N01__N07": {
+      "edge_id": "N01__N07",
+      "a": "N01",
+      "b": "N07",
+      "minutes": 4,
+      "name": "School Lane",
+      "closed": false
+    },
+    "N01__N06": {
+      "edge_id": "N01__N06",
+      "a": "N01",
+      "b": "N06",
+      "minutes": 3,
+      "name": "Hospital Road",
+      "closed": false
+    },
+    "N06__N10": {
+      "edge_id": "N06__N10",
+      "a": "N06",
+      "b": "N10",
+      "minutes": 2,
+      "name": "Hospital Road",
+      "closed": false
+    },
+    "N03__N10": {
+      "edge_id": "N03__N10",
+      "a": "N03",
+      "b": "N10",
+      "minutes": 3,
+      "name": "Temple Street",
+      "closed": false
+    },
+    "N03__N07": {
+      "edge_id": "N03__N07",
+      "a": "N03",
+      "b": "N07",
+      "minutes": 3,
+      "name": "Temple Street",
+      "closed": false
+    },
+    "N09__N10": {
+      "edge_id": "N09__N10",
+      "a": "N10",
+      "b": "N09",
+      "minutes": 5,
+      "name": "Bridge Road",
+      "closed": false
+    },
+    "N05__N09": {
+      "edge_id": "N05__N09",
+      "a": "N09",
+      "b": "N05",
+      "minutes": 4,
+      "name": "Old Town Road",
+      "closed": false
+    },
+    "N09__N12": {
+      "edge_id": "N09__N12",
+      "a": "N09",
+      "b": "N12",
+      "minutes": 3,
+      "name": "East Bank Road",
+      "closed": false
+    },
+    "N02__N09": {
+      "edge_id": "N02__N09",
+      "a": "N09",
+      "b": "N02",
+      "minutes": 6,
+      "name": "Riverside Drive",
+      "closed": false
+    },
+    "N02__N11": {
+      "edge_id": "N02__N11",
+      "a": "N11",
+      "b": "N02",
+      "minutes": 2,
+      "name": "Riverside Drive",
+      "closed": false
+    },
+    "N02__N08": {
+      "edge_id": "N02__N08",
+      "a": "N08",
+      "b": "N02",
+      "minutes": 4,
+      "name": "Hall Road",
+      "closed": false
+    },
+    "N04__N08": {
+      "edge_id": "N04__N08",
+      "a": "N08",
+      "b": "N04",
+      "minutes": 5,
+      "name": "Market Road",
+      "closed": false
+    },
+    "N04__N06": {
+      "edge_id": "N04__N06",
+      "a": "N06",
+      "b": "N04",
+      "minutes": 4,
+      "name": "Market Road",
+      "closed": false
+    },
+    "N08__N11": {
+      "edge_id": "N08__N11",
+      "a": "N11",
+      "b": "N08",
+      "minutes": 5,
+      "name": "Jetty Road",
+      "closed": false
+    },
+    "N05__N12": {
+      "edge_id": "N05__N12",
+      "a": "N05",
+      "b": "N12",
+      "minutes": 4,
+      "name": "Old Town Jetty Lane",
+      "closed": false
+    },
+    "N02__N04": {
+      "edge_id": "N02__N04",
+      "a": "N02",
+      "b": "N04",
+      "minutes": 5,
+      "name": "Market Road",
+      "closed": false
+    }
   }
 }

@@ -1,0 +1,19 @@
+# Patterns are relative to the build context root, so anything that must be
+# excluded at any depth needs an explicit **/ prefix.
+
+**/__pycache__/
+**/*.pyc
+.venv/
+.venv*/
+venv/
+.git/
+.gitignore
+
+# Secrets - never bake these into the image.
+**/.env
+**/.env.*
+**/serviceAccountKey.json
+
+frontend/
+backend/test_*.py
+**/*.md

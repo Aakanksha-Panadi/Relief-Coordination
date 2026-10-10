@@ -1,23 +1,19 @@
 import json
 import re
-import os
-from dotenv import load_dotenv
 
-load_dotenv()
+from app.config import (
+    MOCK_MODE,
+    NODE_HINT,
+    NODE_IDS,
+    gemini_model,
+    resolve_node_from_text,
+)
 
-MOCK_MODE = True  # Switch to False when on personal network
 
 class IntakeAgent:
     def __init__(self):
-        if not MOCK_MODE:
-            import vertexai
-            from vertexai.generative_models import GenerativeModel
-            vertexai.init(
-                project=os.getenv("GOOGLE_CLOUD_PROJECT", "resourceworkflow"),
-                location="us-central1"
-            )
-            self.model = GenerativeModel("gemini-2.0-flash")
-        
+        self.model = None if MOCK_MODE else gemini_model()
+
     def process_message(self, raw_message: str) -> dict:
         if MOCK_MODE:
             return self._mock_extract(raw_message)
@@ -28,6 +24,10 @@ class IntakeAgent:
 You are a disaster relief intake agent processing emergency help requests.
 Extract information and return ONLY valid JSON, no explanation, no markdown.
 
+These are the only locations in the district. Pick the node id whose name best
+matches where the caller is. Match on ward numbers and landmarks:
+{NODE_HINT}
+
 Message: "{raw_message}"
 
 Return exactly this JSON:
@@ -35,7 +35,7 @@ Return exactly this JSON:
   "language": "detected language name",
   "translated_text": "english translation",
   "location_description": "location mentioned or unknown",
-  "node_id": "closest node from: N01,N02,N03,N04,N05,N06,N07,N08,N09,N10,N11,N12 or unknown",
+  "node_id": "closest matching node id from the list above, e.g. N05",
   "people_count": 0,
   "urgency": "CRITICAL or HIGH or MEDIUM or LOW",
   "vulnerable": true or false,
@@ -53,7 +53,15 @@ Rules:
         response = self.model.generate_content(prompt)
         text = response.text.strip()
         text = re.sub(r'```json|```', '', text).strip()
-        return json.loads(text)
+        result = json.loads(text)
+
+        # Gemini still returns "unknown" when a message is vague; resolve from
+        # the description so the request does not silently route to a default.
+        if result.get("node_id") not in NODE_IDS:
+            result["node_id"] = resolve_node_from_text(
+                result.get("location_description", "")
+            ) or resolve_node_from_text(result.get("translated_text", "")) or "unknown"
+        return result
 
     def _mock_extract(self, raw_message: str) -> dict:
         msg = raw_message.lower()
@@ -79,7 +87,7 @@ Rules:
             vulnerable_details = "children present"
             people_count = 5
             needs = ["evacuation"]
-        elif any(word in msg for word in ['paani', 'bahut', 'jaldi', 'log', 'help']):
+        elif any(word in msg for word in ['paani', 'bahut', 'jaldi', 'zyada', 'madad', 'bachao']):
             language = "Mixed Hindi-English"
             translated = "HELP water is very high 3 people please boat quickly"
             location = "Ward 7"

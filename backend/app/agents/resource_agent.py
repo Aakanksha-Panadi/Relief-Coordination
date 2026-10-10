@@ -49,6 +49,21 @@ class ResourceAgent:
                 r.update(updates)
                 break
 
+    def delete_docs(self, collection: str, doc_ids: list) -> int:
+        """Remove specific documents. Used by reset to undo a demo run."""
+        if not self.db or not doc_ids:
+            return 0
+        removed = 0
+        for doc_id in doc_ids:
+            if not doc_id:
+                continue
+            try:
+                self.db.collection(collection).document(doc_id).delete()
+                removed += 1
+            except Exception as e:
+                print(f"Delete failed for {collection}/{doc_id}: {e}")
+        return removed
+
     def get_pending_requests(self) -> list:
         if self.db:
             try:
@@ -63,7 +78,14 @@ class ResourceAgent:
     def save_request(self, request_data: dict) -> str:
         if self.db:
             try:
-                doc_ref = self.db.collection("requests").document()
+                # Key on requestId so re-running a demo overwrites the same
+                # document instead of piling up duplicates.
+                doc_id = request_data.get("requestId")
+                doc_ref = (
+                    self.db.collection("requests").document(doc_id)
+                    if doc_id
+                    else self.db.collection("requests").document()
+                )
                 doc_ref.set(request_data)
                 return doc_ref.id
             except Exception as e:
@@ -73,7 +95,12 @@ class ResourceAgent:
     def save_assignment(self, assignment: dict) -> str:
         if self.db:
             try:
-                doc_ref = self.db.collection("assignments").document()
+                doc_id = assignment.get("assignmentId")
+                doc_ref = (
+                    self.db.collection("assignments").document(doc_id)
+                    if doc_id
+                    else self.db.collection("assignments").document()
+                )
                 doc_ref.set(assignment)
                 return doc_ref.id
             except Exception as e:

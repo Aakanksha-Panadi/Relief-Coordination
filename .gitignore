@@ -3,3 +3,12 @@ backend/serviceAccountKey.json
 
 # Environment variables
 .env
+serviceAccountKey.json
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+dist/
+build/

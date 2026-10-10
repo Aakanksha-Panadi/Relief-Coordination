@@ -1,26 +1,14 @@
-import os
-from dotenv import load_dotenv
+from app.config import MOCK_MODE, gemini_model, resource_node, request_node
 from app.optimizer.router import DistrictRouter
 from app.optimizer.constraints import ConstraintEngine
 
-load_dotenv()
-
-MOCK_MODE = True
 
 class ReplanAgent:
     def __init__(self, router: DistrictRouter, resources: list):
         self.router = router
         self.resources = resources
         self.constraints = ConstraintEngine()
-
-        if not MOCK_MODE:
-            import vertexai
-            from vertexai.generative_models import GenerativeModel
-            vertexai.init(
-                project=os.getenv("GOOGLE_CLOUD_PROJECT", "resourceworkflow"),
-                location="us-central1"
-            )
-            self.model = GenerativeModel("gemini-2.0-flash")
+        self.model = None if MOCK_MODE else gemini_model()
 
     def simulate_road_closure(
         self, edge_id: str, current_assignments: list
@@ -37,9 +25,9 @@ class ReplanAgent:
 
             if edge_id in old_edges:
                 affected.append(assignment)
-                req_node = assignment["request"].get("node_id", "N04")
+                req_node = request_node(assignment["request"])
                 res = assignment["resource"]
-                res_node = self._get_resource_node(res)
+                res_node = resource_node(res)
 
                 new_route = self.router.shortest_path(res_node, req_node)
 
@@ -128,17 +116,6 @@ Return only the explanation.
         response = self.model.generate_content(prompt)
         return response.text.strip()
 
-    def _get_resource_node(self, resource: dict) -> str:
-        location_map = {
-            "Central_Depot": "N01",
-            "Zone_A_Dock": "N11",
-            "Zone_B_Dock": "N12",
-            "Zone_C_Dock": "N12",
-            "Zone_B_Community_Hall": "N08",
-            "Zone_A_School": "N07"
-        }
-        return location_map.get(resource.get("location", ""), "N01")
-
     def _calc_metrics(
         self, assignments: list, use_new: bool = False
     ) -> dict:
@@ -152,9 +129,14 @@ Return only the explanation.
         critical_total = 0
 
         for a in assignments:
-            route = a.get("new_route" if use_new else "route", {})
-            if route:
-                times.append(route.get("minutes", 0))
+            # After a replan only affected assignments carry a new_route;
+            # unchanged ones must still contribute their original ETA or the
+            # "after" average silently drops them and looks better than it is.
+            route = a.get("route") or {}
+            if use_new and a.get("new_route"):
+                route = a["new_route"]
+            if route and route.get("minutes", -1) >= 0:
+                times.append(route["minutes"])
             if a["request"].get("urgency") == "CRITICAL":
                 critical_total += 1
                 if a.get("status") != "BLOCKED":

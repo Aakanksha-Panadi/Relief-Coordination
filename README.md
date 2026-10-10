@@ -118,7 +118,7 @@ curl -X POST http://localhost:8080/intake/process \
 ## Architecture
 
 ```
-React frontend  (not built yet)
+React frontend  frontend/ (Vite + React 18)
       │ HTTP
 FastAPI  backend/main.py                     ← transport + validation only
       │
@@ -279,5 +279,5 @@ Requires `backend/serviceAccountKey.json` (git-ignored, never commit it).
 | Evaluation harness | Done |
 | Firestore schema + seed | Done |
 | Container + deploy config | Done, not yet deployed |
-| Frontend | Not started |
+| Frontend | React console built (`frontend/`); needs `npm install` — Node not yet installed |
 | Gemini live mode | Code paths written, needs a network that allows Vertex AI |

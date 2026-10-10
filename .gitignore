@@ -12,3 +12,8 @@ venv/
 *.egg-info/
 dist/
 build/
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.vite/

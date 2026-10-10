@@ -54,7 +54,10 @@ class ConstraintEngine:
         # present as capacity 0 and fail every check.
         current = resource_load(resource)
         capacity = resource_capacity(resource)
-        people = request.get("people_count", 0)
+        people = request.get("people_count")
+        if not isinstance(people, int) or people <= 0:
+            violations.append({"rule": "R006", "message": "People count is unknown; coordinator review required"})
+            people = 0
         if current + people > capacity:
             violations.append({
                 "rule": "R001",

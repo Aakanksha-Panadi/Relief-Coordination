@@ -67,18 +67,31 @@ def unwrap(result: dict) -> dict:
 
 class IntakeRequest(BaseModel):
     message: str = Field(..., min_length=1, description="Raw help message, any language")
+    media_type: str = Field(default="text", description="text, audio, or image; unsupported media is held for human review")
 
 
 class BatchIntakeRequest(BaseModel):
-    messages: list[str] = Field(..., min_length=1)
+    messages: list[str] = Field(..., min_length=1, max_length=10)
 
 
 class RoadClosureRequest(BaseModel):
     edge_id: str = Field(..., description="Edge to close, e.g. N09__N10")
 
 
+class ResourceUnavailableRequest(BaseModel):
+    reason: str = Field(..., min_length=2, description="Breakdown, low fuel, or operator unreachable")
+
+
 class ApprovalRequest(BaseModel):
     approved_by: str = "coordinator"
+
+
+class PlanReviewRequest(BaseModel):
+    decision: str = Field(..., description="reject or edit")
+    coordinator: str = "coordinator"
+    reason: str = ""
+    exclude_resource_ids: list[str] = Field(default_factory=list)
+    request_updates: dict[str, dict] = Field(default_factory=dict)
 
 
 class CompleteRequest(BaseModel):
@@ -125,7 +138,7 @@ def intake_process(payload: IntakeRequest):
     stored must not come back as 200 with a plausible-looking body.
     """
     try:
-        return get_orchestrator().process_intake(payload.message)
+        return get_orchestrator().process_intake(payload.message, payload.media_type)
     except IntakeExtractionError as e:
         raise HTTPException(
             status_code=502,
@@ -176,6 +189,12 @@ def resources_summary():
     return get_orchestrator().get_resource_summary()
 
 
+@app.post("/resources/{resource_id}/unavailable", tags=["resources"])
+def resource_unavailable(resource_id: str, payload: ResourceUnavailableRequest):
+    """Report a failed responder and produce a replacement plan for approval."""
+    return unwrap(get_orchestrator().mark_resource_unavailable(resource_id, payload.reason))
+
+
 # ---------- dispatch ----------
 
 
@@ -187,8 +206,8 @@ def dispatch_plan():
 
 @app.get("/dispatch/current", tags=["dispatch"])
 def dispatch_current():
-    plan = get_orchestrator().current_plan
-    if not plan:
+    plan = get_orchestrator().get_current_plan()
+    if "error" in plan:
         raise HTTPException(status_code=404, detail="No active dispatch plan")
     return plan
 
@@ -198,6 +217,18 @@ def dispatch_approve(payload: ApprovalRequest | None = None):
     """Human in the loop. Commits the plan and marks resources busy."""
     approved_by = payload.approved_by if payload else "coordinator"
     return unwrap(get_orchestrator().approve_plan(approved_by))
+
+
+@app.post("/dispatch/review", tags=["dispatch"])
+def dispatch_review(payload: PlanReviewRequest):
+    """Reject or edit a proposal, record the decision, and compute a new plan."""
+    return unwrap(get_orchestrator().review_plan(
+        decision=payload.decision,
+        coordinator=payload.coordinator,
+        reason=payload.reason,
+        exclude_resource_ids=payload.exclude_resource_ids,
+        request_updates=payload.request_updates,
+    ))
 
 
 @app.post("/dispatch/complete", tags=["dispatch"])
@@ -226,7 +257,12 @@ def replan_approve(payload: ApprovalRequest | None = None):
 
 @app.post("/replan/reopen", tags=["replan"])
 def replan_reopen(payload: RoadClosureRequest):
-    return get_orchestrator().reopen_edge(payload.edge_id)
+    return unwrap(get_orchestrator().reopen_edge(payload.edge_id))
+
+
+@app.get("/replan/current", tags=["replan"])
+def replan_current():
+    return get_orchestrator().get_replan_status()
 
 
 # ---------- metrics & lifecycle ----------

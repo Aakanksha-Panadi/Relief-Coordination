@@ -71,6 +71,7 @@ export default function App() {
                 busy={rq.busy}
                 onGenerate={rq.generatePlan}
                 onApprove={rq.approvePlan}
+                onReject={rq.reviewPlan}
                 onApproveReplan={rq.approveReplan}
                 onSelectRequest={setSelectedId}
               />

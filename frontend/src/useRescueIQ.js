@@ -24,6 +24,7 @@ export function useRescueIQ() {
   const [offline, setOffline] = useState(false)
 
   const toastId = useRef(0)
+  const reminderKey = useRef('')
 
   const notify = useCallback((message, tone = 'info') => {
     const id = ++toastId.current
@@ -131,9 +132,40 @@ export function useRescueIQ() {
     const timer = setInterval(() => {
       loadRequests()
       loadSummary()
+      api.currentPlan().then((nextPlan) => {
+        setPlan(nextPlan)
+        const key = `${nextPlan.planId}:${nextPlan.approval_reminder_count ?? 0}`
+        if (nextPlan.approval_reminder_count && reminderKey.current !== key) {
+          reminderKey.current = key
+          notify(nextPlan.last_approval_reminder_at
+            ? `Critical plan has waited ${Math.floor((nextPlan.approval_wait_seconds ?? 0) / 60)} minutes for approval. It has not been dispatched.`
+            : 'Critical plan is awaiting coordinator approval. It has not been dispatched.', 'warn')
+        }
+      }).catch(() => {})
     }, POLL_SECONDS * 1000)
     return () => clearInterval(timer)
-  }, [loadRequests, loadSummary])
+  }, [loadRequests, loadSummary, notify])
+
+  // Closure changes are coalesced server-side for up to a minute. Poll only
+  // while that batch is pending, then expose the single resulting replan.
+  useEffect(() => {
+    if (replan?.status !== 'REPLAN_SCHEDULED') return undefined
+    const timer = setInterval(async () => {
+      try {
+        const result = await api.replanStatus()
+        if (result?.status === 'READY') {
+          setReplan(result)
+          notify(result.summary || 'Network replan ready for coordinator review', 'warn')
+          await loadGraph()
+        } else if (result?.status === 'REPLAN_SCHEDULED') {
+          setReplan(result)
+        }
+      } catch {
+        /* the existing offline indicator handles polling failures */
+      }
+    }, 2000)
+    return () => clearInterval(timer)
+  }, [replan?.status, notify, loadGraph])
 
   // ---------- actions ----------
 
@@ -142,10 +174,17 @@ export function useRescueIQ() {
       const result = await run('intake', () => api.processIntake(message))
       if (result) {
         setLastExtraction(result)
-        notify(
-          `${result.requestId} extracted — ${result.language}, ${result.urgency}`,
-          'success',
-        )
+        if (result.replacement_plan) setPlan(result.replacement_plan)
+        const message = result.followup_action === 'linked_duplicate'
+          ? `Report linked to ${result.linked_request_id} (${result.report_count} reports)`
+          : result.followup_action === 'updated'
+            ? `${result.linked_request_id} updated from follow-up`
+            : result.followup_action === 'cancelled'
+              ? `${result.linked_request_id} cancelled; resources replanned`
+              : result.status === 'UNPROCESSED'
+                ? 'Report held for coordinator review'
+                : `${result.requestId} extracted — ${result.language}, ${result.urgency}`
+        notify(message, result.status === 'UNPROCESSED' ? 'warn' : 'success')
         await Promise.all([loadRequests(), loadSummary()])
       }
       return result
@@ -182,19 +221,34 @@ export function useRescueIQ() {
   const approvePlan = useCallback(async () => {
     const result = await run('approve', () => api.approvePlan())
     if (result) {
+      if (result.replanned) {
+        setPlan(result.plan)
+        notify(result.message, 'warn')
+        return result
+      }
       notify(`${result.approved_count} assignments approved`, 'success')
-      setPlan((p) => (p ? { ...p, status: 'APPROVED' } : p))
+      setPlan((p) => (p ? { ...p, status: result.plan_status ?? 'APPROVED', approval_status: 'APPROVED' } : p))
       await Promise.all([loadRequests(), loadSummary()])
     }
     return result
   }, [run, notify, loadRequests, loadSummary])
+
+  const reviewPlan = useCallback(async (reason) => {
+    const result = await run('reviewPlan', () => api.reviewPlan({ decision: 'reject', reason }))
+    if (result) {
+      setPlan(result.plan)
+      notify('Plan rejected and recomputed with its resources excluded', 'warn')
+      await loadMetrics()
+    }
+    return result
+  }, [run, notify, loadMetrics])
 
   const closeRoad = useCallback(
     async (edgeId) => {
       const result = await run('replan', () => api.closeRoad(edgeId))
       if (result) {
         setReplan(result)
-        notify(result.summary, 'warn')
+        notify(result.summary || 'Road closure recorded', 'warn')
         await loadGraph()
       }
       return result
@@ -218,10 +272,11 @@ export function useRescueIQ() {
 
   const reopenRoad = useCallback(
     async (edgeId) => {
-      const result = await run('reopen', () => api.reopenRoad(edgeId), {
-        successMessage: `${edgeId} reopened`,
-      })
-      if (result) await loadGraph()
+      const result = await run('reopen', () => api.reopenRoad(edgeId))
+      if (result) {
+        if (result.status === 'REPLAN_SCHEDULED') setReplan(result)
+        await loadGraph()
+      }
       return result
     },
     [run, loadGraph],
@@ -280,6 +335,7 @@ export function useRescueIQ() {
     submitBatch,
     generatePlan,
     approvePlan,
+    reviewPlan,
     closeRoad,
     approveReplan,
     reopenRoad,

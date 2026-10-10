@@ -119,6 +119,10 @@ function ExtractionResult({ data }) {
           <Row key={key} label={key} value={value} />
         ))}
       </div>
+      {data.human_review_required && <div className="why-box why-amber">
+        Held for coordinator review: {(data.processing_flags ?? []).join(', ') || 'low confidence'}
+      </div>}
+      {data.raw_text && <div className="ac-route">Raw report: {data.raw_text}</div>}
     </div>
   )
 }

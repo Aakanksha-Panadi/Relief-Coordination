@@ -5,13 +5,22 @@ class DistrictRouter:
         self.nodes = graph_data.get("nodes", {})
         self.edges = graph_data.get("edges", {})
         self.closed_edges = set(graph_data.get("closedEdges", []))
+        self.revision = 0
 
     def close_edge(self, edge_id: str):
-        self.closed_edges.add(edge_id)
-        print(f"Edge closed: {edge_id}")
+        changed = edge_id not in self.closed_edges
+        if changed:
+            self.closed_edges.add(edge_id)
+            self.revision += 1
+            print(f"Edge closed: {edge_id}")
+        return changed
 
     def open_edge(self, edge_id: str):
-        self.closed_edges.discard(edge_id)
+        changed = edge_id in self.closed_edges
+        if changed:
+            self.closed_edges.discard(edge_id)
+            self.revision += 1
+        return changed
 
     def get_neighbors(self, node_id: str) -> list:
         neighbors = []
@@ -94,6 +103,23 @@ class DistrictRouter:
     def path_minutes(self, edge_ids: list) -> int:
         """Travel time over a list of edges, used to price a partial journey."""
         return sum(self.edge_minutes(e) for e in edge_ids)
+
+    def connected_components(self) -> list[list[str]]:
+        """Areas separated by the current set of road closures."""
+        unseen = set(self.nodes)
+        components = []
+        while unseen:
+            start = min(unseen)
+            stack, component = [start], set()
+            while stack:
+                node = stack.pop()
+                if node not in unseen:
+                    continue
+                unseen.remove(node)
+                component.add(node)
+                stack.extend(n for n, _minutes, _edge in self.get_neighbors(node) if n in unseen)
+            components.append(sorted(component))
+        return components
 
     def debug_path(self, start: str, end: str):
         result = self.shortest_path(start, end)

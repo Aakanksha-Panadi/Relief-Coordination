@@ -63,6 +63,9 @@ function RequestCard({ req, selected, onSelect }) {
         {req.language && <span className="lang-chip">{req.language}</span>}
         {req.status === 'ASSIGNED' && <span className="status-chip">ASSIGNED</span>}
         {req.status === 'SERVED' && <span className="status-chip">SERVED</span>}
+        {req.status === 'UNPROCESSED' && <span className="status-chip">UNPROCESSED · REVIEW</span>}
+        {req.status === 'UNREACHABLE' && <span className="status-chip">UNREACHABLE · ESCALATE</span>}
+        {req.human_review_required && req.status !== 'UNPROCESSED' && <span className="status-chip">REVIEW REQUIRED</span>}
         {typeof req.confidence === 'number' && (
           <span className="conf-chip">{Math.round(req.confidence * 100)}%</span>
         )}
@@ -77,7 +80,8 @@ function RequestCard({ req, selected, onSelect }) {
 
       <div className="tags">
         <span className="tag">{req.requestId}</span>
-        <span className="tag">{req.people_count ?? 0} people</span>
+        <span className="tag">{req.people_count == null ? 'Count unknown' : `${req.people_count} people`}</span>
+        {(req.report_count ?? 1) > 1 && <span className="tag">{req.report_count} reports linked</span>}
         {(req.needs ?? []).map((need) => (
           <span className="tag" key={need}>{need}</span>
         ))}

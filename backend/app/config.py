@@ -195,7 +195,7 @@ def normalize_request(request: dict) -> dict:
     out["urgency"] = normalize_urgency(out.get("urgency"))
 
     people = out.get("people_count")
-    out["people_count"] = int(people) if isinstance(people, (int, float)) else 0
+    out["people_count"] = int(people) if isinstance(people, (int, float)) else None
 
     if not out.get("location_description"):
         # Seeded requests carry a structured `location` ("Ward_7") instead.
@@ -220,7 +220,6 @@ _TEXT_TO_NODE = [
     ("ward 7", "N05"), ("ward7", "N05"),
     ("ward 9", "N06"), ("ward9", "N06"),
     ("old town", "N05"),
-    ("market", "N04"),
     ("hospital", "N06"),
     ("temple street", "N03"),
     ("riverside", "N02"),
@@ -235,14 +234,20 @@ _TEXT_TO_NODE = [
 
 
 def resolve_node_from_text(text: str) -> str | None:
-    """Best-effort node lookup from a free-text location description."""
+    """Return only an unambiguous node match; never pick the first landmark."""
     if not text:
         return None
     lowered = text.lower()
-    for pattern, node in _TEXT_TO_NODE:
-        if pattern in lowered:
-            return node
-    return None
+    # An explicitly stated ward is the strongest supported location signal.
+    ward_matches = {node for pattern, node in _TEXT_TO_NODE
+                    if pattern.startswith("ward") and pattern in lowered}
+    if len(ward_matches) == 1:
+        return next(iter(ward_matches))
+    if len(ward_matches) > 1:
+        return None
+    matches = {node for pattern, node in _TEXT_TO_NODE
+               if not pattern.startswith("ward") and pattern in lowered}
+    return next(iter(matches)) if len(matches) == 1 else None
 
 
 def request_node(request: dict) -> str | None:

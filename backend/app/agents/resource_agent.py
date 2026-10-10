@@ -1,4 +1,5 @@
 import os
+import threading
 from dotenv import load_dotenv
 from google.cloud.firestore_v1.base_query import FieldFilter
 
@@ -17,10 +18,98 @@ class PersistenceError(RuntimeError):
 
 
 class ResourceAgent:
-    def __init__(self, db_client=None, mock_resources: list = None):
+    def __init__(self, db_client=None, mock_resources: list | None = None):
         self.db = db_client
         self.mock_resources = mock_resources or []
         self.source = "unknown"
+        self._reservation_lock = threading.RLock()
+
+    def reserve_plan_resources(self, assignments: list) -> dict:
+        """Atomically claim every resource in a plan before writing assignments."""
+        loads = {}
+        owners = {}
+        shelter_loads = {}
+        for assignment in assignments:
+            if assignment.get("status") not in ("PENDING_APPROVAL", "PARTIAL"):
+                continue
+            resource = assignment.get("resource") or {}
+            resource_id = resource.get("resourceId")
+            if not resource_id:
+                continue
+            people = assignment.get("wave_people", assignment.get("request", {}).get("people_count", 0)) or 0
+            loads[resource_id] = max(loads.get(resource_id, 0), people)
+            owners.setdefault(resource_id, assignment.get("request", {}).get("requestId"))
+            shelter = assignment.get("shelter") or {}
+            shelter_id = shelter.get("resourceId")
+            if shelter_id:
+                shelter_loads[shelter_id] = shelter_loads.get(shelter_id, 0) + people
+
+        with self._reservation_lock:
+            db = self.db
+            if db is not None:
+                try:
+                    from google.cloud import firestore
+
+                    transaction = db.transaction()
+
+                    @firestore.transactional
+                    def reserve(txn):
+                        refs = {rid: db.collection("resources").document(rid) for rid in set(loads) | set(shelter_loads)}
+                        snapshots = {rid: txn.get(ref) for rid, ref in refs.items()}
+                        pending_updates = {}
+                        for rid, snapshot in snapshots.items():
+                            data = snapshot.to_dict() if snapshot.exists else None
+                            if not data:
+                                raise ValueError(f"Resource {rid} no longer available")
+                            if rid in shelter_loads:
+                                if data.get("available", True) is False or data.get("powerAvailable", data.get("power_available", True)) is False:
+                                    raise ValueError(f"Shelter {rid} is unavailable or has no power")
+                                new_load = resource_load(data) + shelter_loads[rid]
+                                if new_load > resource_capacity(data):
+                                    raise ValueError(f"Shelter {rid} filled before approval")
+                                pending_updates[rid] = {"currentOccupancy": new_load,
+                                                        "available": new_load < resource_capacity(data)}
+                                continue
+                            if not data.get("available", False):
+                                raise ValueError(f"Resource {rid} no longer available")
+                            new_load = resource_load(data) + loads[rid]
+                            if new_load > resource_capacity(data):
+                                raise ValueError(f"Resource {rid} capacity changed; no longer available")
+                            pending_updates[rid] = {
+                                "available": False,
+                                "currentLoad": new_load,
+                                "assignedTo": owners[rid],
+                            }
+                        for rid, updates in pending_updates.items():
+                            txn.update(refs[rid], updates)
+                        return pending_updates
+
+                    updates = reserve(transaction)
+                except Exception as exc:
+                    return {"ok": False, "reason": str(exc)}
+            else:
+                by_id = {r.get("resourceId"): r for r in self.mock_resources}
+                updates = {}
+                for rid, people in loads.items():
+                    resource = by_id.get(rid)
+                    if not resource or not resource.get("available", False):
+                        return {"ok": False, "reason": f"Resource {rid} no longer available"}
+                    new_load = resource_load(resource) + people
+                    if new_load > resource_capacity(resource):
+                        return {"ok": False, "reason": f"Resource {rid} capacity changed; no longer available"}
+                    updates[rid] = {"available": False, "currentLoad": new_load, "assignedTo": owners[rid]}
+                for rid, people in shelter_loads.items():
+                    shelter = by_id.get(rid)
+                    if not shelter or shelter.get("available", True) is False or shelter.get("powerAvailable", shelter.get("power_available", True)) is False:
+                        return {"ok": False, "reason": f"Shelter {rid} is unavailable or has no power"}
+                    new_load = resource_load(shelter) + people
+                    if new_load > resource_capacity(shelter):
+                        return {"ok": False, "reason": f"Shelter {rid} filled before approval"}
+                    updates[rid] = {"currentOccupancy": new_load,
+                                    "available": new_load < resource_capacity(shelter)}
+                for rid, fields in updates.items():
+                    by_id[rid].update(fields)
+        return {"ok": True, "updates": updates}
 
     def get_all_resources(self) -> list:
         """Live fleet from Firestore, or the hardcoded fallback.
@@ -35,6 +124,15 @@ class ResourceAgent:
                 resources = [doc.to_dict() for doc in docs]
                 if resources:
                     self.source = "firestore"
+                    for resource in resources:
+                        low_fuel = str(resource.get("fuelLevel", "")).lower() == "low"
+                        operator_lost = resource.get("operatorReachable", True) is False
+                        if (low_fuel or operator_lost) and resource.get("available", True):
+                            reason = "low fuel" if low_fuel else "operator unreachable"
+                            resource.update({"available": False, "status": "UNAVAILABLE", "unavailable_reason": reason})
+                            self.update_resource(resource.get("resourceId"), {
+                                "available": False, "status": "UNAVAILABLE", "unavailable_reason": reason,
+                            })
                     return resources
                 print("Firestore 'resources' collection is empty; using fallback fleet")
             except Exception as e:
@@ -42,7 +140,7 @@ class ResourceAgent:
         self.source = "fallback"
         return self.mock_resources
 
-    def get_available(self, resource_type: str = None) -> list:
+    def get_available(self, resource_type: str | None = None) -> list:
         resources = self.get_all_resources()
         available = [r for r in resources if r.get("available", False)]
         if resource_type:
@@ -117,6 +215,18 @@ class ResourceAgent:
             print(f"Firestore pending-request read failed: {e}")
             return []
 
+    def get_active_requests(self) -> list:
+        """Open cases used for repeat-report matching across service restarts."""
+        if not self.db:
+            return []
+        try:
+            docs = self.db.collection("requests").stream()
+            return [self._to_request(doc) for doc in docs
+                    if (doc.to_dict() or {}).get("status") in ("PENDING", "ASSIGNED")]
+        except Exception as e:
+            print(f"Firestore active-request read failed: {e}")
+            return []
+
     @staticmethod
     def _to_request(doc) -> dict:
         """Normalize a document and guarantee it has an id.
@@ -179,3 +289,14 @@ class ResourceAgent:
             except Exception as e:
                 print(f"Save failed: {e}")
         return "mock_id"
+
+    def save_event(self, event: dict) -> str:
+        """Persist coordinator decisions/reminders as an append-only audit item."""
+        if not self.db:
+            return "memory_only"
+        try:
+            ref = self.db.collection("audit_events").document()
+            ref.set(event)
+            return ref.id
+        except Exception as e:
+            raise PersistenceError(f"Could not write audit event: {e}") from e

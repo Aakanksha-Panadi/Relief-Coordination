@@ -4,6 +4,7 @@ export default function DispatchPanel({
   busy,
   onGenerate,
   onApprove,
+  onReject,
   onApproveReplan,
   onSelectRequest,
 }) {
@@ -11,7 +12,7 @@ export default function DispatchPanel({
   const view = replan ?? plan
   const assignments = view?.assignments ?? []
   const unassigned = plan?.unassigned ?? []
-  const approved = plan?.status === 'APPROVED'
+  const approved = plan?.approval_status === 'APPROVED' || plan?.status === 'APPROVED'
 
   return (
     <>
@@ -27,7 +28,17 @@ export default function DispatchPanel({
       {replan && (
         <div className="closure-bar">
           <span>⚠</span>
-          <span>{replan.summary}</span>
+          <span>{replan.summary || (replan.status === 'REPLAN_SCHEDULED'
+            ? `Network change recorded. Replanning once after ${replan.seconds_remaining ?? replan.debounce_seconds ?? 60}s of stability.`
+            : 'Routes recalculated after network changes.')}</span>
+        </div>
+      )}
+      {(replan?.alerts ?? []).map((alert, index) => (
+        <div className="why-box why-amber" key={`${index}-${alert}`}>{alert}</div>
+      ))}
+      {replan?.unreachable_areas?.length > 0 && (
+        <div className="why-box why-red">
+          Unreachable areas: {replan.unreachable_areas.map((area) => area.map((item) => item.name).join(', ')).join(' · ')}
         </div>
       )}
 
@@ -73,6 +84,11 @@ export default function DispatchPanel({
                 <strong>Tradeoff:</strong> {plan.tradeoff}
               </div>
             )}
+            {plan.alerts?.length > 0 && plan.alerts.map((alert, index) => (
+              <div className="why-box why-amber" style={{ marginTop: 8 }} key={`${index}-${alert}`}>
+                {alert}
+              </div>
+            ))}
           </>
         )}
       </div>
@@ -86,19 +102,25 @@ export default function DispatchPanel({
 
           {replan ? (
             <button className="btn-approve" onClick={onApproveReplan}
-                    disabled={busy.approveReplan} style={{ flex: 1 }}>
-              {busy.approveReplan ? 'Approving…' : 'Approve replan'}
+                    disabled={busy.approveReplan || replan.status === 'REPLAN_SCHEDULED'} style={{ flex: 1 }}>
+              {replan.status === 'REPLAN_SCHEDULED' ? 'Waiting to replan…' : busy.approveReplan ? 'Approving…' : 'Approve replan'}
             </button>
           ) : (
-            <button className="btn-approve" onClick={onApprove}
-                    disabled={busy.approve || !plan || approved} style={{ flex: 1 }}>
-              {busy.approve ? 'Approving…' : approved ? 'Approved' : 'Approve plan'}
-            </button>
+            <>
+              <button className="btn-approve" onClick={onApprove}
+                      disabled={busy.approve || !plan || approved} style={{ flex: 1 }}>
+                {busy.approve ? 'Approving…' : approved ? 'Approved' : 'Approve plan'}
+              </button>
+              <button className="ghost-btn" onClick={() => onReject?.('Coordinator rejected the proposed assignments.')}
+                      disabled={busy.reviewPlan || !plan || approved} style={{ flex: 1 }}>
+                {busy.reviewPlan ? 'Replanning…' : 'Reject & replan'}
+              </button>
+            </>
           )}
         </div>
         <div className="audit-line">
           {plan
-            ? `${plan.total_assigned} assigned · ${plan.total_unassigned} unassigned`
+            ? `${plan.total_assigned} assigned · ${plan.total_unassigned} unassigned${plan.approval_wait_seconds && plan.approval_status !== 'APPROVED' ? ` · waiting ${Math.floor(plan.approval_wait_seconds / 60)}m ${plan.approval_wait_seconds % 60}s` : ''}`
             : 'Coordinator approval required before dispatch'}
         </div>
       </div>
@@ -111,9 +133,10 @@ function AssignmentCard({ a, onSelect }) {
   const old = a.old_route
   const blocked = a.status === 'BLOCKED'
   const replanned = a.status === 'REPLANNED'
+  const returning = a.status === 'RETURNING'
   const delay = a.delay_minutes
 
-  const cls = ['ac', blocked ? 'blocked' : '', replanned ? 'replanned' : '']
+  const cls = ['ac', blocked ? 'blocked' : '', replanned || returning ? 'replanned' : '']
     .filter(Boolean).join(' ')
 
   return (
@@ -146,6 +169,9 @@ function AssignmentCard({ a, onSelect }) {
           Rerouted · {delay >= 0 ? `+${delay}` : delay} min
         </div>
       )}
+      {returning && <div className="ac-change">Returning to safety · ETA {a.return_eta_minutes ?? route.minutes} min</div>}
+      {a.wave && <div className="ac-change">Wave {a.wave} of {a.wave_count} · {a.wave_people} people · scheduled ETA {route.minutes} min</div>}
+      {a.shelter && <div className="ac-route">Destination shelter: {a.shelter.name}</div>}
 
       {a.explanation && (
         <div className={`why-box ${blocked ? 'why-red' : replanned ? 'why-amber' : 'why-green'}`}>

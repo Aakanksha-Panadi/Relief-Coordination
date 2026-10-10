@@ -92,6 +92,7 @@ export const api = {
       method: 'POST',
       body: { approved_by: approvedBy },
     }),
+  reviewPlan: (review) => request('/dispatch/review', { method: 'POST', body: review }),
   completeRequest: (requestId) =>
     request('/dispatch/complete', {
       method: 'POST',
@@ -107,6 +108,7 @@ export const api = {
     }),
   reopenRoad: (edgeId) =>
     request('/replan/reopen', { method: 'POST', body: { edge_id: edgeId } }),
+  replanStatus: () => request('/replan/current'),
 
   metrics: () => request('/metrics'),
   events: () => request('/events'),

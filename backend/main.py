@@ -14,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app import config
+from app.agents.intake_agent import IntakeExtractionError
+from app.agents.resource_agent import PersistenceError
 from app.main_orchestrator import RescueIQOrchestrator
 
 # Single long-lived orchestrator: it holds the in-flight plan and road
@@ -79,16 +81,25 @@ class ApprovalRequest(BaseModel):
     approved_by: str = "coordinator"
 
 
+class CompleteRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, description="Request that has been served")
+
+
 # ---------- health & meta ----------
 
 
 @app.get("/health", tags=["meta"])
 def health():
+    orch = get_orchestrator()
     return {
         "status": "healthy",
         "service": "RescueIQ",
         "mock_mode": config.MOCK_MODE,
-        "firestore": get_orchestrator().db is not None,
+        "firestore": orch.db is not None,
+        # "fallback" means the hardcoded 8-resource fleet is live instead of
+        # the 16 seeded ones — different capacities and positions entirely.
+        "resource_source": orch.resource_agent.source,
+        "resource_count": len(orch.resources),
     }
 
 
@@ -108,8 +119,24 @@ def graph():
 
 @app.post("/intake/process", tags=["intake"])
 def intake_process(payload: IntakeRequest):
-    """Raw multilingual message in, structured request out."""
-    return get_orchestrator().process_intake(payload.message)
+    """Raw multilingual message in, structured request out.
+
+    Failures are explicit on purpose: a request that was not extracted or not
+    stored must not come back as 200 with a plausible-looking body.
+    """
+    try:
+        return get_orchestrator().process_intake(payload.message)
+    except IntakeExtractionError as e:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "Extraction failed", "message": str(e),
+                    "raw_output": e.raw_output[:500]},
+        ) from e
+    except PersistenceError as e:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Request was not stored", "message": str(e)},
+        ) from e
 
 
 @app.post("/intake/batch", tags=["intake"])
@@ -171,6 +198,15 @@ def dispatch_approve(payload: ApprovalRequest | None = None):
     """Human in the loop. Commits the plan and marks resources busy."""
     approved_by = payload.approved_by if payload else "coordinator"
     return unwrap(get_orchestrator().approve_plan(approved_by))
+
+
+@app.post("/dispatch/complete", tags=["dispatch"])
+def dispatch_complete(payload: CompleteRequest):
+    """Rescue finished: free the resource and move it to where it went.
+
+    The only route back from busy other than a full reset.
+    """
+    return unwrap(get_orchestrator().complete_assignment(payload.request_id))
 
 
 # ---------- replanning ----------

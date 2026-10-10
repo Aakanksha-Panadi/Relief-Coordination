@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -45,6 +46,12 @@ class RescueIQOrchestrator:
         self.last_replan = None
         self.events = []
         self._session_assignment_ids = set()
+        # Request ids are handed out under a lock: `+=` is not atomic, and
+        # FastAPI runs sync endpoints on a threadpool, so two concurrent
+        # intake calls could mint the same id and .set() would overwrite one
+        # live emergency with the other.
+        self._id_lock = threading.Lock()
+        self._id_scan_failed = False
         # Seeded demo requests already occupy REQ_001.. in Firestore. Start
         # above them so a live run never overwrites (and reset never deletes)
         # the fixtures the seed script created.
@@ -61,8 +68,19 @@ class RescueIQOrchestrator:
                 if match:
                     highest = max(highest, int(match.group(1)))
             return highest
-        except Exception:
+        except Exception as e:
+            # Returning 0 here would restart numbering at REQ_001 and
+            # overwrite existing documents. Switch to opaque ids instead.
+            print(f"Could not scan existing request ids ({e}); using opaque ids")
+            self._id_scan_failed = True
             return 0
+
+    def _next_request_id(self) -> str:
+        if self._id_scan_failed:
+            return f"REQ_{uuid.uuid4().hex[:8].upper()}"
+        with self._id_lock:
+            self._req_counter += 1
+            return f"REQ_{self._req_counter:03d}"
 
     def _connect_firestore(self):
         try:
@@ -80,19 +98,36 @@ class RescueIQOrchestrator:
     # ---------- intake ----------
 
     def process_intake(self, message: str) -> dict:
+        """Extract, persist, queue. Raises if the request could not be stored.
+
+        Both failure modes propagate deliberately: an emergency that was not
+        recorded must not look like a success to the caller.
+        """
         result = self.intake.process_message(message)
-        self._req_counter += 1
-        result["requestId"] = f"REQ_{self._req_counter:03d}"
+        result["requestId"] = self._next_request_id()
         result["raw_text"] = message
         result["status"] = "PENDING"
         result["createdAt"] = datetime.now(timezone.utc).isoformat()
-
+        # Stays PENDING even when the location is unresolved, so it surfaces
+        # in the next dispatch plan's `unassigned` list with a reason rather
+        # than disappearing into a status nobody queries.
         self.resource_agent.save_request(result)
         self.current_requests.append(result)
         return result
 
     def process_intake_batch(self, messages: list) -> list:
-        return [self.process_intake(m) for m in messages]
+        """Per-message isolation: one bad message must not drop the rest."""
+        results = []
+        for message in messages:
+            try:
+                results.append(self.process_intake(message))
+            except Exception as e:
+                results.append({
+                    "raw_text": message,
+                    "status": "FAILED",
+                    "error": str(e),
+                })
+        return results
 
     def get_requests(self, status: str = None) -> list:
         requests = self.current_requests
@@ -118,12 +153,21 @@ class RescueIQOrchestrator:
         if not pending:
             return {"error": "All requests are already assigned"}
 
+        # Baseline is scored against the same fleet the real plan sees.
+        # Computing it later, after /dispatch/approve has marked resources
+        # busy, handed the baseline a depleted fleet and understated it.
+        baseline = self.evaluator.score_plan(
+            self.evaluator.baseline_plan(pending), len(pending)
+        )
+
         self.current_plan = self.dispatch.create_plan(pending)
         self.current_plan["planId"] = f"PLAN_{uuid.uuid4().hex[:8]}"
         self.current_plan["generatedAt"] = datetime.now(timezone.utc).isoformat()
         self.current_plan["metrics"] = self.evaluator.score_plan(
             self.current_plan, len(pending)
         )
+        self.current_plan["baseline_metrics"] = baseline
+        self.current_plan["request_count"] = len(pending)
         return self.current_plan
 
     def approve_plan(self, approved_by: str = "coordinator") -> dict:
@@ -161,15 +205,30 @@ class RescueIQOrchestrator:
                 resource["resourceId"],
                 {
                     "available": False,
-                    "currentLoad": resource.get("currentLoad", 0)
+                    "currentLoad": config.resource_load(resource)
                     + request.get("people_count", 0),
                     "assignedTo": request.get("requestId"),
+                    # Where it is headed, so completing the trip can update
+                    # its position instead of leaving it at its old depot.
+                    "destinationNode": (route.get("path") or [None])[-1],
                 },
             )
-            self._apply_resource_update(resource["resourceId"], request)
+            self._apply_resource_update(resource["resourceId"], request, route)
 
             request["status"] = "ASSIGNED"
             request["assignedResources"] = [resource["resourceId"]]
+            # Write the status through. Keeping it in memory only meant that
+            # after a restart this request reappeared as PENDING and was
+            # dispatched a second time while the fleet was still busy.
+            self.resource_agent.update_request(
+                request.get("requestId"),
+                {
+                    "status": "ASSIGNED",
+                    "assignedResources": [resource["resourceId"]],
+                    "assignmentId": record["assignmentId"],
+                    "assignedAt": now,
+                },
+            )
             assignment["status"] = "APPROVED"
             approved.append(record)
 
@@ -185,15 +244,77 @@ class RescueIQOrchestrator:
             "approvedAt": now,
         }
 
-    def _apply_resource_update(self, resource_id: str, request: dict):
+    def _apply_resource_update(
+        self, resource_id: str, request: dict, route: dict = None
+    ):
         for r in self.resources:
             if r.get("resourceId") == resource_id:
                 r["available"] = False
-                r["currentLoad"] = r.get("currentLoad", 0) + request.get(
+                r["currentLoad"] = config.resource_load(r) + request.get(
                     "people_count", 0
                 )
                 r["assignedTo"] = request.get("requestId")
+                if route:
+                    r["destinationNode"] = (route.get("path") or [None])[-1]
                 break
+
+    def complete_assignment(self, request_id: str) -> dict:
+        """Mark a rescue finished: free the resource and move it to where it went.
+
+        Without this there was no way back from busy except /reset, so a
+        resource was effectively consumed by its first assignment and the
+        fleet drained over a demo.
+        """
+        if not self.current_plan:
+            return {"error": "No active dispatch plan"}
+
+        match = next(
+            (
+                a for a in self.current_plan.get("assignments", [])
+                if a.get("request", {}).get("requestId") == request_id
+            ),
+            None,
+        )
+        if not match:
+            return {"error": f"No assignment found for request '{request_id}'"}
+        if match.get("status") == "COMPLETED":
+            return {"error": f"{request_id} is already completed"}
+        if match.get("status") != "APPROVED":
+            return {"error": f"{request_id} has not been approved yet"}
+
+        resource = match["resource"]
+        route = match.get("route", {})
+        arrived_at = (route.get("path") or [None])[-1]
+        now = datetime.now(timezone.utc).isoformat()
+
+        updates = {
+            "available": True,
+            "currentLoad": 0,
+            "assignedTo": None,
+            # The vehicle is now where the rescue was, not at its depot.
+            "currentNode": arrived_at,
+        }
+        self.resource_agent.update_resource(resource["resourceId"], updates)
+        for r in self.resources:
+            if r.get("resourceId") == resource["resourceId"]:
+                r.update(updates)
+                break
+
+        match["status"] = "COMPLETED"
+        match["request"]["status"] = "COMPLETED"
+        self.resource_agent.update_request(
+            request_id, {"status": "COMPLETED", "completedAt": now}
+        )
+        self.events.append(
+            {"type": "assignment_completed", "requestId": request_id, "timestamp": now}
+        )
+        return {
+            "requestId": request_id,
+            "resourceId": resource["resourceId"],
+            "released": True,
+            "currentNode": arrived_at,
+            "completedAt": now,
+        }
 
     # ---------- replanning ----------
 
@@ -242,12 +363,22 @@ class RescueIQOrchestrator:
     # ---------- read models ----------
 
     def get_resource_summary(self) -> dict:
-        return self.resource_agent.get_summary()
+        return {
+            "by_type": self.resource_agent.get_summary(),
+            # Firestore and the hardcoded fallback are different fleets with
+            # different capacities and positions; say which one is live.
+            "source": self.resource_agent.source,
+        }
 
     def get_metrics(self) -> dict:
+        """Compare against the baseline snapshot taken when the plan was made."""
         if not self.current_plan:
             return {"error": "No dispatch plan yet. Generate one first."}
-        return self.evaluator.compare(self.current_requests, self.current_plan)
+        return self.evaluator.compare(
+            self.current_requests,
+            self.current_plan,
+            baseline=self.current_plan.get("baseline_metrics"),
+        )
 
     def get_graph(self) -> dict:
         return {
@@ -282,14 +413,28 @@ class RescueIQOrchestrator:
 
         freed = 0
         for r in self.resources:
-            was_busy = not r.get("available", True) or r.get("currentLoad", 0)
+            was_busy = (
+                not r.get("available", True)
+                or config.resource_load(r)
+                or r.get("currentNode")
+            )
             r["available"] = True
             r["currentLoad"] = 0
             r.pop("assignedTo", None)
+            # Positions must reset too, or the next run starts every vehicle
+            # at wherever the previous run's last rescue happened to end.
+            r.pop("currentNode", None)
+            r.pop("destinationNode", None)
             if was_busy:
                 self.resource_agent.update_resource(
                     r["resourceId"],
-                    {"available": True, "currentLoad": 0, "assignedTo": None},
+                    {
+                        "available": True,
+                        "currentLoad": 0,
+                        "assignedTo": None,
+                        "currentNode": None,
+                        "destinationNode": None,
+                    },
                 )
                 freed += 1
 
@@ -307,7 +452,7 @@ class RescueIQOrchestrator:
         """
         freed = 0
         for r in self.resource_agent.get_all_resources():
-            if not r.get("available", True) or r.get("currentLoad", 0):
+            if not r.get("available", True) or config.resource_load(r):
                 self.resource_agent.update_resource(
                     r["resourceId"],
                     {"available": True, "currentLoad": 0, "assignedTo": None},
@@ -320,29 +465,40 @@ class RescueIQOrchestrator:
         return {"resources_freed": freed}
 
     def _load_mock_resources(self) -> list:
+        """Offline fallback fleet.
+
+        Deliberately a strict subset of what data/seed_firestore.py writes —
+        same ids, capacities, positions and skills — so losing Firestore
+        shrinks the fleet rather than silently swapping in a different world.
+        """
         return [
             {"resourceId": "BOAT_01", "type": "boat", "name": "Rescue Boat 1",
              "capacity": 8, "currentLoad": 0, "location": "Zone_A_Dock",
-             "available": True},
+             "node_id": "N11", "available": True},
             {"resourceId": "BOAT_02", "type": "boat", "name": "Rescue Boat 2",
              "capacity": 6, "currentLoad": 0, "location": "Zone_B_Dock",
-             "available": True},
+             "node_id": "N12", "available": True},
             {"resourceId": "BOAT_03", "type": "boat", "name": "Rescue Boat 3",
              "capacity": 10, "currentLoad": 0, "location": "Zone_C_Dock",
-             "available": True},
+             "node_id": "N12", "available": True},
             {"resourceId": "BOAT_04", "type": "boat", "name": "Rescue Boat 4",
              "capacity": 5, "currentLoad": 0, "location": "Central_Depot",
-             "available": True},
+             "node_id": "N01", "available": True},
             {"resourceId": "TEAM_01", "type": "volunteer_team",
              "name": "Volunteer Team Alpha", "capacity": 15, "currentLoad": 0,
-             "location": "Central_Depot", "available": True},
+             "location": "Central_Depot", "node_id": "N01", "available": True,
+             "skills": ["first_aid", "evacuation", "search_rescue"]},
             {"resourceId": "TEAM_02", "type": "volunteer_team",
              "name": "Volunteer Team Beta", "capacity": 20, "currentLoad": 0,
-             "location": "Zone_B_Community_Hall", "available": True},
+             "location": "Zone_B_Community_Hall", "node_id": "N08",
+             "available": True,
+             "skills": ["evacuation", "food_distribution"]},
             {"resourceId": "TEAM_03", "type": "volunteer_team",
              "name": "Volunteer Team Gamma", "capacity": 10, "currentLoad": 0,
-             "location": "Zone_A_Dock", "available": True},
+             "location": "Zone_C_School", "node_id": "N07", "available": True,
+             "skills": ["first_aid", "medical_support"]},
             {"resourceId": "MED_01", "type": "medical_unit",
              "name": "Medical Unit 1", "capacity": 5, "currentLoad": 0,
-             "location": "Central_Depot", "available": True},
+             "location": "Central_Depot", "node_id": "N01", "available": True,
+             "supplies": ["first_aid", "insulin", "bp_medication", "oxygen"]},
         ]

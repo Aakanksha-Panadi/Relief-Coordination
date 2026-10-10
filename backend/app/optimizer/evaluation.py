@@ -5,10 +5,13 @@ requests in the order they arrived and hand each one the first resource
 someone can reach on the phone. Every number reported here is computed from
 real plans over the real road graph; nothing is hardcoded.
 """
-from app.config import resource_node, request_node
+from app.config import (
+    DISPATCHABLE_TYPES as DISPATCHABLE,
+    normalize_urgency,
+    request_node,
+    resource_node,
+)
 from app.optimizer.constraints import ConstraintEngine
-
-DISPATCHABLE = ("boat", "volunteer_team")
 
 
 class EvaluationHarness:
@@ -31,6 +34,9 @@ class EvaluationHarness:
 
         for req in requests:  # arrival order, deliberately unsorted
             req_node = request_node(req)
+            if not req_node:
+                unassigned.append(req)
+                continue
             picked = None
             for resource in available:
                 if resource["resourceId"] in used:
@@ -100,7 +106,7 @@ class EvaluationHarness:
         """
         criticals = [
             i for i, a in enumerate(assignments)
-            if a["request"].get("urgency") == "CRITICAL"
+            if normalize_urgency(a["request"].get("urgency")) == "CRITICAL"
         ]
         if not criticals:
             return 100
@@ -108,7 +114,7 @@ class EvaluationHarness:
         first_non_critical = next(
             (
                 i for i, a in enumerate(assignments)
-                if a["request"].get("urgency") != "CRITICAL"
+                if normalize_urgency(a["request"].get("urgency")) != "CRITICAL"
             ),
             len(assignments),
         )
@@ -117,9 +123,18 @@ class EvaluationHarness:
 
     # ---------- comparison ----------
 
-    def compare(self, requests: list, rescueiq_plan: dict) -> dict:
-        total = len(requests)
-        baseline = self.score_plan(self.baseline_plan(requests), total)
+    def compare(
+        self, requests: list, rescueiq_plan: dict, baseline: dict = None
+    ) -> dict:
+        """Compare the two plans.
+
+        `baseline` should be the snapshot taken when the plan was generated:
+        recomputing it here, after approval has marked resources busy, scores
+        the baseline against a fleet the real plan already consumed.
+        """
+        total = rescueiq_plan.get("request_count") or len(requests)
+        if baseline is None:
+            baseline = self.score_plan(self.baseline_plan(requests), total)
         rescueiq = self.score_plan(rescueiq_plan, total)
 
         def delta_pct(before, after, lower_is_better=True):

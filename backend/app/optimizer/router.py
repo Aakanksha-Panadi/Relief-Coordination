@@ -88,6 +88,13 @@ class DistrictRouter:
             "blocked": False
         }
 
+    def edge_minutes(self, edge_id: str) -> int:
+        return self.edges.get(edge_id, {}).get("minutes", 0)
+
+    def path_minutes(self, edge_ids: list) -> int:
+        """Travel time over a list of edges, used to price a partial journey."""
+        return sum(self.edge_minutes(e) for e in edge_ids)
+
     def debug_path(self, start: str, end: str):
         result = self.shortest_path(start, end)
         print(f"\nPath {start} → {end}:")

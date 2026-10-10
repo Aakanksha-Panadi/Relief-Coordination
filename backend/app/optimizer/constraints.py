@@ -1,3 +1,11 @@
+from app.config import (
+    meets_needs,
+    normalize_urgency,
+    resource_capacity,
+    resource_load,
+)
+
+
 class ConstraintEngine:
     def __init__(self, rules: list = None):
         self.rules = rules or self._default_rules()
@@ -41,14 +49,29 @@ class ConstraintEngine:
                 "message": f"{resource['resourceId']} is not available"
             })
 
-        # Hard rule — capacity
-        current = resource.get("currentLoad", 0)
-        capacity = resource.get("capacity", 0)
+        # Hard rule — capacity. Read through the alias helpers: shelters are
+        # seeded with totalCapacity/currentOccupancy and would otherwise
+        # present as capacity 0 and fail every check.
+        current = resource_load(resource)
+        capacity = resource_capacity(resource)
         people = request.get("people_count", 0)
         if current + people > capacity:
             violations.append({
                 "rule": "R001",
                 "message": f"Capacity exceeded: {current + people} > {capacity}"
+            })
+
+        # Soft rule — capability. Not disqualifying: a team without medical
+        # training still beats nobody, but the score should prefer one that
+        # has it.
+        needs = request.get("needs", [])
+        if needs and meets_needs(resource, needs) == 0:
+            warnings.append({
+                "rule": "R005",
+                "message": (
+                    f"{resource.get('resourceId')} is not equipped for "
+                    f"{', '.join(str(n) for n in needs)}"
+                )
             })
 
         return {
@@ -67,11 +90,16 @@ class ConstraintEngine:
             "MEDIUM": 10,
             "LOW": 0
         }
-        score += urgency_bonus.get(request.get("urgency", "LOW"), 0)
+        # Normalized so "Critical" cannot miss the lookup and score as LOW.
+        score += urgency_bonus.get(normalize_urgency(request.get("urgency")), 0)
 
         # Vulnerable bonus
         if request.get("vulnerable", False):
             score += 20
+
+        # Capability bonus — 15 per need this resource is equipped for, so a
+        # medically-trained team outranks a marginally closer one that is not.
+        score += 15 * meets_needs(resource, request.get("needs", []))
 
         # Distance penalty
         minutes = route.get("minutes", 99)

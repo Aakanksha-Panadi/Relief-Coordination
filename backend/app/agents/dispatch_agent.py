@@ -1,4 +1,11 @@
-from app.config import MOCK_MODE, gemini_model, resource_node, request_node
+from app.config import (
+    DISPATCHABLE_TYPES,
+    MOCK_MODE,
+    gemini_model,
+    normalize_urgency,
+    request_node,
+    resource_node,
+)
 from app.optimizer.router import DistrictRouter
 from app.optimizer.constraints import ConstraintEngine
 
@@ -16,14 +23,14 @@ class DispatchAgent:
         sorted_requests = sorted(
             requests,
             key=lambda r: (
-                priority_order.get(r.get("urgency", "LOW"), 3),
+                priority_order.get(normalize_urgency(r.get("urgency")), 3),
                 0 if r.get("vulnerable") else 1
             )
         )
 
         available_resources = [
             r for r in self.resources
-            if r.get("available", False) and r.get("type") in ["boat", "volunteer_team"]
+            if r.get("available", False) and r.get("type") in DISPATCHABLE_TYPES
         ]
 
         assignments = []
@@ -32,6 +39,17 @@ class DispatchAgent:
 
         for req in sorted_requests:
             req_node = request_node(req)
+            if not req_node:
+                # Location never resolved. Surfacing this is the whole point:
+                # defaulting to a node produced a confident plan that sent a
+                # boat to the wrong ward.
+                req["blockedReason"] = (
+                    "Location could not be resolved to a known node. "
+                    "Needs manual triage."
+                )
+                unassigned.append(req)
+                continue
+
             best = None
             best_score = -999
 
@@ -56,7 +74,8 @@ class DispatchAgent:
                     best = {
                         "resource": resource,
                         "route": route,
-                        "score": score
+                        "score": score,
+                        "warnings": validation["warnings"],
                     }
 
             if best:
@@ -68,11 +87,20 @@ class DispatchAgent:
                     "resource": best["resource"],
                     "route": best["route"],
                     "score": best["score"],
+                    # Always empty by construction: invalid candidates are
+                    # filtered above. Recorded explicitly so the metrics
+                    # comparison reports a measured value, not a missing key.
+                    "violations": [],
+                    "warnings": best["warnings"],
                     "explanation": explanation,
                     "status": "PENDING_APPROVAL"
                 })
                 used_resources.add(best["resource"]["resourceId"])
             else:
+                req["blockedReason"] = (
+                    "No available resource has the capacity and a clear route "
+                    "to this location."
+                )
                 unassigned.append(req)
 
         tradeoff = self._explain_tradeoff(assignments)
@@ -102,21 +130,45 @@ class DispatchAgent:
             reason += " No constraint violations."
             return reason
 
+        # Every field uses .get(): requests reaching here may have come from a
+        # seeded Firestore document, and a missing key used to raise KeyError
+        # and turn the whole dispatch call into a 500.
         prompt = f"""
 You are a disaster relief coordinator. Explain this assignment in 2 sentences.
 Be specific about why this resource was chosen.
 
-Resource: {resource['name']} at {resource['location']}
-Request: {request['people_count']} people at {request['location_description']}
-Urgency: {request['urgency']}
-Vulnerable: {request.get('vulnerable_details', 'None')}
+Resource: {resource.get('name', resource.get('resourceId', 'Unknown'))} at {resource.get('location', 'unknown location')}
+Capabilities: {', '.join(resource.get('skills', [])) or 'general'}
+Request: {request.get('people_count', 0)} people at {request.get('location_description', 'unknown location')}
+Needs: {', '.join(str(n) for n in request.get('needs', [])) or 'unspecified'}
+Urgency: {request.get('urgency', 'HIGH')}
+Vulnerable: {request.get('vulnerable_details') or 'None'}
 Route: {' → '.join(route.get('path_names', []))}
-ETA: {route['minutes']} minutes
+ETA: {route.get('minutes', '?')} minutes
 
 Return only the explanation, no JSON.
 """
-        response = self.model.generate_content(prompt)
-        return response.text.strip()
+        try:
+            response = self.model.generate_content(prompt)
+            return (response.text or "").strip() or self._fallback_explanation(
+                resource, request, route
+            )
+        except Exception as e:
+            # An explanation is narration, not a decision. Losing it must not
+            # take the dispatch plan down with it.
+            print(f"Explanation generation failed: {e}")
+            return self._fallback_explanation(resource, request, route)
+
+    def _fallback_explanation(
+        self, resource: dict, request: dict, route: dict
+    ) -> str:
+        res_name = resource.get("name", resource.get("resourceId", "Resource"))
+        path_names = route.get("path_names", [])
+        route_str = " → ".join(path_names) if path_names else "direct route"
+        return (
+            f"{res_name} assigned. ETA {route.get('minutes', '?')} minutes "
+            f"via {route_str}. Selected on urgency, capacity and travel time."
+        )
 
     def _explain_tradeoff(self, assignments: list) -> str:
         if len(assignments) < 2:
@@ -125,12 +177,12 @@ Return only the explanation, no JSON.
         first = assignments[0]
         second = assignments[1] if len(assignments) > 1 else None
         
-        if second and first["request"].get("urgency") == "CRITICAL":
+        if second and normalize_urgency(first["request"].get("urgency")) == "CRITICAL":
             delay = second["route"].get("minutes", 0) - first["route"].get("minutes", 0)
             if delay > 0:
                 return (
-                    f"Serving {first['request']['location_description']} first "
-                    f"delays {second['request']['location_description']} by ~{delay} minutes. "
+                    f"Serving {first['request'].get('location_description', 'the first location')} first "
+                    f"delays {second['request'].get('location_description', 'the second location')} by ~{delay} minutes. "
                     f"Recommended because first group is CRITICAL "
                     f"{'with vulnerable members' if first['request'].get('vulnerable') else ''}."
                 )

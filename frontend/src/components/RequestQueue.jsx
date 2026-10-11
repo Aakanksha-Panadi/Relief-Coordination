@@ -9,20 +9,24 @@ function byPriority(a, b) {
 }
 
 export default function RequestQueue({ requests, selectedId, onSelect }) {
-  const sorted = [...requests].sort(byPriority)
-  const pending = sorted.filter((r) => r.status !== 'SERVED')
+  const sorted = requests
+    .filter((r) => !r.assignmentId
+      && !(Array.isArray(r.assignedResources) && r.assignedResources.length > 0)
+      && ['PENDING', 'UNPROCESSED', 'UNREACHABLE'].includes(r.status))
+    .sort(byPriority)
+  const pending = sorted.length
 
   return (
     <>
       <div className="panel-head">
         <span className="panel-title">Request queue</span>
         <span className="sort-chip">
-          {pending.length} pending · by urgency
+          {pending} pending · by urgency
         </span>
       </div>
 
       <div className="scroll-area">
-        {sorted.length === 0 ? (
+        {pending === 0 ? (
           <div className="empty">
             <div className="empty-title">No requests yet</div>
             <div className="empty-sub">

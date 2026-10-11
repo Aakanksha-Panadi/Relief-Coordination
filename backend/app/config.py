@@ -6,6 +6,7 @@ with a single environment variable.
 """
 import json
 import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,7 +18,7 @@ def _flag(name: str, default: str) -> bool:
 
 # MOCK_MODE=true  -> deterministic canned extraction/explanations, no network.
 # MOCK_MODE=false -> real Gemini calls through Vertex AI.
-MOCK_MODE = _flag("MOCK_MODE", "true")
+MOCK_MODE = _flag("MOCK_MODE", "false")
 
 GCP_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "resourceworkflow")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
@@ -234,10 +235,16 @@ _TEXT_TO_NODE = [
 
 
 def resolve_node_from_text(text: str) -> str | None:
-    """Return only an unambiguous node match; never pick the first landmark."""
+    """Resolve a caller's wording against node names without guessing ties.
+
+    In addition to explicit ward/landmark aliases, match meaningful words in
+    the graph's node names. This lets "Market Road" resolve to the unique
+    "Ward 5 Market Road" node while generic phrases such as "Bridge Road"
+    remain unresolved when they match multiple nodes.
+    """
     if not text:
         return None
-    lowered = text.lower()
+    lowered = text.lower().replace("_", " ")
     # An explicitly stated ward is the strongest supported location signal.
     ward_matches = {node for pattern, node in _TEXT_TO_NODE
                     if pattern.startswith("ward") and pattern in lowered}
@@ -245,6 +252,37 @@ def resolve_node_from_text(text: str) -> str | None:
         return next(iter(ward_matches))
     if len(ward_matches) > 1:
         return None
+    # Match normalized meaningful tokens against official graph node names
+    # and configured location aliases. Require strong query-token coverage,
+    # then accept only a unique best node.
+    normalized = re.sub(r"\brd\b", "road", lowered)
+    tokens = set(re.findall(r"[a-z0-9]+", normalized))
+    tokens -= {"at", "in", "near", "the", "of", "area", "location", "around", "to"}
+    if not tokens:
+        return None
+
+    candidates = {}
+
+    def add_candidate(label, node_id):
+        label_tokens = set(re.findall(r"[a-z0-9]+", re.sub(r"\brd\b", "road", label.lower().replace("_", " "))))
+        label_tokens -= {"at", "in", "near", "the", "of", "area", "location", "around", "to"}
+        if not label_tokens:
+            return
+        coverage = len(tokens.intersection(label_tokens)) / len(tokens)
+        if coverage >= 0.8:
+            candidates[node_id] = max(candidates.get(node_id, 0), coverage)
+
+    for node_id, node in NODES.items():
+        add_candidate(str(node.get("name", "")), node_id)
+    for alias, node_id in LOCATION_TO_NODE.items():
+        add_candidate(alias, node_id)
+
+    if candidates:
+        best_score = max(candidates.values())
+        best_nodes = [node_id for node_id, score in candidates.items() if score == best_score]
+        # A tie is an explicit ambiguity. Do not fall back to a weaker alias.
+        return best_nodes[0] if len(best_nodes) == 1 else None
+
     matches = {node for pattern, node in _TEXT_TO_NODE
                if not pattern.startswith("ward") and pattern in lowered}
     return next(iter(matches)) if len(matches) == 1 else None

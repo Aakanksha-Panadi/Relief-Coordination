@@ -7,12 +7,15 @@ export default function DispatchPanel({
   onReject,
   onApproveReplan,
   onSelectRequest,
+  selectedRequestId,
+  approvedPlans = [],
 }) {
   // After a closure the replan result is the live view of the plan.
   const view = replan ?? plan
   const assignments = view?.assignments ?? []
   const unassigned = plan?.unassigned ?? []
   const approved = plan?.approval_status === 'APPROVED' || plan?.status === 'APPROVED'
+  const awaitingApproval = plan?.approval_status === 'WAITING'
 
   return (
     <>
@@ -91,13 +94,40 @@ export default function DispatchPanel({
             ))}
           </>
         )}
+
+        <section className="approved-history">
+          <div className="approved-history-head">
+            <span className="panel-title">Approved plans</span>
+            <span className="sort-chip">{approvedPlans.length} total</span>
+          </div>
+          {approvedPlans.length === 0 ? (
+            <div className="approved-history-empty">No plans approved yet.</div>
+          ) : approvedPlans.map((approvedPlan) => (
+            <article className="approved-plan-card" key={approvedPlan.planId}>
+              <div className="approved-plan-title">
+                <strong>{approvedPlan.planId}</strong>
+                <span>{approvedPlan.assignmentCount} assignment{approvedPlan.assignmentCount === 1 ? '' : 's'}</span>
+              </div>
+              <div className="approved-plan-meta">
+                Approved by {approvedPlan.approvedBy || 'coordinator'}
+                {approvedPlan.approvedAt && ` · ${new Date(approvedPlan.approvedAt).toLocaleString()}`}
+              </div>
+              {(approvedPlan.assignments ?? []).map((assignment, index) => (
+                <div className="approved-plan-assignment" key={assignment.assignmentId ?? `${approvedPlan.planId}-${index}`}>
+                  {assignment.requestId || 'Request'} → {(assignment.resourceIds ?? []).join(', ') || 'Resource'}
+                  {assignment.wave && ` · wave ${assignment.wave}/${assignment.wave_count ?? '?'}`}
+                </div>
+              ))}
+            </article>
+          ))}
+        </section>
       </div>
 
       <div className="rp-foot">
         <div className="foot-btns">
-          <button className="ghost-btn" onClick={onGenerate} disabled={busy.plan}
+          <button className="ghost-btn" onClick={() => onGenerate(selectedRequestId)} disabled={busy.plan || awaitingApproval}
                   style={{ flex: 1 }}>
-            {busy.plan ? <><span className="spinner" /> Planning…</> : 'Generate plan'}
+            {busy.plan ? <><span className="spinner" /> Planning…</> : awaitingApproval ? 'Plan awaiting approval' : selectedRequestId ? 'Plan selected request' : 'Plan next request'}
           </button>
 
           {replan ? (
@@ -120,7 +150,7 @@ export default function DispatchPanel({
         </div>
         <div className="audit-line">
           {plan
-            ? `${plan.total_assigned} assigned · ${plan.total_unassigned} unassigned${plan.approval_wait_seconds && plan.approval_status !== 'APPROVED' ? ` · waiting ${Math.floor(plan.approval_wait_seconds / 60)}m ${plan.approval_wait_seconds % 60}s` : ''}`
+            ? `${plan.total_assigned} in this plan · ${plan.total_approved_assignments ?? 0} total assignments approved · ${plan.total_unassigned} unassigned${plan.approval_wait_seconds && plan.approval_status !== 'APPROVED' ? ` · waiting ${Math.floor(plan.approval_wait_seconds / 60)}m ${plan.approval_wait_seconds % 60}s` : ''}`
             : 'Coordinator approval required before dispatch'}
         </div>
       </div>

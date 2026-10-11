@@ -31,6 +31,7 @@ class RescueIQOrchestrator:
         self.resource_agent = ResourceAgent(
             db_client=self.db, mock_resources=self.mock_resources
         )
+        self._approved_plans = self.resource_agent.get_approved_plans()
 
         # One canonical resource list, mutated in place on approval so that
         # dispatch and replan always see current availability.
@@ -55,6 +56,7 @@ class RescueIQOrchestrator:
         self._closure_debounce_seconds = 60
         self._plan_reminders = {}
         self._session_assignment_ids = set()
+        self._session_assigned_request_ids = set()
         # Request ids are handed out under a lock: `+=` is not atomic, and
         # FastAPI runs sync endpoints on a threadpool, so two concurrent
         # intake calls could mint the same id and .set() would overwrite one
@@ -118,6 +120,7 @@ class RescueIQOrchestrator:
         """
         if not self.current_requests:
             self.current_requests = self.resource_agent.get_active_requests()
+        self._collapse_duplicate_open_requests()
         result = (self.intake.process_message(message) if media_type == "text" else
                   self.intake._unprocessed(message, f"Unsupported media type: {media_type}"))
         result["raw_text"] = message
@@ -135,7 +138,7 @@ class RescueIQOrchestrator:
         match = self._match_existing_report(message, result, candidates)
         if match is None and followup and len(candidates) == 1:
             match = candidates[0]
-        if match and (followup or self._same_report(message, match)):
+        if match and (followup or self._same_report(message, match, result.get("translated_text", ""))):
             if cancellation:
                 previous_status = match.get("status")
                 match["status"] = "CANCELLED" if previous_status == "PENDING" else "COMPLETED"
@@ -182,7 +185,7 @@ class RescueIQOrchestrator:
                         replacement = candidate_plan
                 return {**match, "linked_request_id": match.get("requestId"), "followup_action": "updated",
                         "replacement_plan": replacement}
-            if self._same_report(message, match):
+            if self._same_report(message, match, result.get("translated_text", "")):
                 match["report_count"] = int(match.get("report_count", 1)) + 1
                 match["last_report_at"] = datetime.now(timezone.utc).isoformat()
                 match["report_sources"] = list(match.get("report_sources", [])) + [message]
@@ -203,15 +206,100 @@ class RescueIQOrchestrator:
         return result
 
     @staticmethod
-    def _same_report(message: str, request: dict) -> bool:
-        norm = lambda value: " ".join("".join(char.lower() if char.isalnum() else " " for char in (value or "")).split())
-        left, right = norm(message), norm(request.get("raw_text", ""))
-        return bool(left and right and SequenceMatcher(None, left, right).ratio() >= 0.82)
+    def _same_report(message: str, request: dict, translated_message: str = "") -> bool:
+        def norm(value):
+            normalized = " ".join("".join(char.lower() if char.isalnum() else " " for char in (value or "")).split())
+            return re.sub(r"\bward\s*(\d+)\b", r"ward \1", normalized)
+
+        incoming = [norm(message), norm(translated_message)]
+        existing = [norm(request.get("raw_text", "")), norm(request.get("translated_text", ""))]
+        stop_words = {"a", "an", "and", "are", "at", "be", "for", "from", "help", "i", "in", "is",
+                      "me", "my", "of", "on", "please", "the", "there", "to", "we", "with", "us"}
+        for left in incoming:
+            if not left:
+                continue
+            left_tokens = set(left.split()) - stop_words
+            for right in existing:
+                if not right:
+                    continue
+                if SequenceMatcher(None, left, right).ratio() >= 0.80:
+                    return True
+                right_tokens = set(right.split()) - stop_words
+                if not left_tokens or not right_tokens:
+                    continue
+                shared = left_tokens & right_tokens
+                jaccard = len(shared) / len(left_tokens | right_tokens)
+                shorter_coverage = len(shared) / min(len(left_tokens), len(right_tokens))
+                # Word overlap catches same-language paraphrases with changed
+                # word order, but requires both strong overlap and shared
+                # coverage so a generic "help, flood" phrase won't merge cases.
+                if jaccard >= 0.68 and shorter_coverage >= 0.82:
+                    return True
+        return False
+
+    def _collapse_duplicate_open_requests(self):
+        """Link multilingual duplicate cases and keep only one dispatchable record."""
+        open_requests = [r for r in self.current_requests if r.get("status") == "PENDING"]
+        for index, canonical in enumerate(open_requests):
+            if canonical.get("status") != "PENDING":
+                continue
+            for duplicate in open_requests[index + 1:]:
+                if duplicate.get("status") != "PENDING":
+                    continue
+                canonical_node = canonical.get("node_id")
+                duplicate_node = duplicate.get("node_id")
+                if canonical_node and duplicate_node and canonical_node != duplicate_node:
+                    continue
+                first_count, second_count = canonical.get("people_count"), duplicate.get("people_count")
+                if first_count is not None and second_count is not None and first_count != second_count:
+                    continue
+                first_needs = set(canonical.get("needs") or [])
+                second_needs = set(duplicate.get("needs") or [])
+                if first_needs and second_needs and not first_needs.intersection(second_needs):
+                    continue
+                if not self._same_report(
+                    canonical.get("raw_text", ""), duplicate,
+                    canonical.get("translated_text", ""),
+                ):
+                    continue
+
+                canonical["report_count"] = int(canonical.get("report_count", 1)) + int(duplicate.get("report_count", 1))
+                canonical["report_sources"] = list(canonical.get("report_sources", [])) + [
+                    duplicate.get("raw_text", ""), *duplicate.get("report_sources", [])
+                ]
+                duplicate["status"] = "DUPLICATE"
+                duplicate["duplicate_of"] = canonical.get("requestId")
+                duplicate["queue_hidden"] = True
+                self.resource_agent.update_request(duplicate.get("requestId"), {
+                    "status": "DUPLICATE", "duplicate_of": canonical.get("requestId"),
+                    "queue_hidden": True,
+                })
+                self.resource_agent.update_request(canonical.get("requestId"), {
+                    "report_count": canonical["report_count"],
+                    "report_sources": canonical["report_sources"],
+                })
+                self._audit({"type": "duplicate_request_linked",
+                             "requestId": duplicate.get("requestId"),
+                             "canonicalRequestId": canonical.get("requestId"),
+                             "report_count": canonical["report_count"],
+                             "timestamp": datetime.now(timezone.utc).isoformat()})
 
     def _match_existing_report(self, message: str, extracted: dict, candidates: list) -> dict | None:
         if not candidates:
             return None
-        same = [r for r in candidates if self._same_report(message, r)]
+        same = []
+        for request in candidates:
+            extracted_node, existing_node = extracted.get("node_id"), request.get("node_id")
+            if extracted_node and existing_node and extracted_node != existing_node:
+                continue
+            new_count, old_count = extracted.get("people_count"), request.get("people_count")
+            if new_count is not None and old_count is not None and new_count != old_count:
+                continue
+            new_needs, old_needs = set(extracted.get("needs") or []), set(request.get("needs") or [])
+            if new_needs and old_needs and not new_needs.intersection(old_needs):
+                continue
+            if self._same_report(message, request, extracted.get("translated_text", "")):
+                same.append(request)
         if len(same) == 1:
             return same[0]
         if len(same) > 1:
@@ -263,21 +351,33 @@ class RescueIQOrchestrator:
         return results
 
     def get_requests(self, status: str = None) -> list:
+        if not self.current_requests:
+            self.current_requests = self.resource_agent.get_active_requests()
+        self._collapse_duplicate_open_requests()
         requests = self.current_requests
-        if not requests:
-            requests = self.resource_agent.get_pending_requests()
+        # Assignment metadata is authoritative if a persisted status write was
+        # delayed or failed; don't return an assigned case as queue-pending.
+        for request in requests:
+            if (request.get("requestId") in self._session_assigned_request_ids
+                    or request.get("assignedResources") or request.get("assignmentId")):
+                request["status"] = "ASSIGNED"
         if status:
             requests = [r for r in requests if r.get("status") == status]
         return requests
 
     # ---------- dispatch ----------
 
-    def generate_dispatch_plan(self) -> dict:
+    def generate_dispatch_plan(self, request_id: str | None = None) -> dict:
+        if (self.current_plan
+                and self.current_plan.get("approval_status") == "WAITING"
+                and self.current_plan.get("status") not in ("STALE", "REJECTED", "EDITED")):
+            return {"error": "Approve or reject the current plan before generating another plan."}
         if not self.current_requests:
             firestore_requests = self.resource_agent.get_pending_requests()
             if not firestore_requests:
                 return {"error": "No requests to dispatch"}
             self.current_requests = firestore_requests
+        self._collapse_duplicate_open_requests()
 
         pending = [
             r for r in self.current_requests
@@ -285,6 +385,16 @@ class RescueIQOrchestrator:
         ]
         if not pending:
             return {"error": "All requests are already assigned"}
+
+        # Each approval covers a single request. Rank the queue with the same
+        # urgency, vulnerability, group-size, ETA, and ID rules as dispatch.
+        if request_id:
+            selected = next((r for r in pending if r.get("requestId") == request_id), None)
+            if selected is None:
+                return {"error": f"Request '{request_id}' is not pending and cannot be planned."}
+            pending = [selected]
+        else:
+            pending = self.dispatch.prioritize_requests(pending)[:1]
 
         # Baseline is scored against the same fleet the real plan sees.
         # Computing it later, after /dispatch/approve has marked resources
@@ -303,7 +413,8 @@ class RescueIQOrchestrator:
             self.current_plan, len(pending)
         )
         self.current_plan["baseline_metrics"] = baseline
-        self.current_plan["request_count"] = len(pending)
+        self.current_plan["request_count"] = 1
+        self.current_plan["total_approved_assignments"] = len(self._session_assignment_ids)
         for request in self.current_plan.get("unassigned", []):
             if request.get("status") == "UNREACHABLE":
                 self.resource_agent.update_request(request.get("requestId"), {
@@ -434,6 +545,11 @@ class RescueIQOrchestrator:
         if not self.current_plan:
             return {"error": "No active dispatch plan to approve"}
 
+        if self.current_plan.get("approval_status") == "APPROVED":
+            return {"error": "This plan has already been approved. Generate a new plan for pending requests."}
+        if self.current_plan.get("approval_status") != "WAITING":
+            return {"error": "This plan is not awaiting approval. Generate a fresh plan before approving."}
+
         if self.current_plan.get("graph_revision") != self.router.revision:
             self.current_plan["status"] = "STALE"
             event = {"type": "plan_rejected_stale", "planId": self.current_plan.get("planId"),
@@ -495,12 +611,14 @@ class RescueIQOrchestrator:
             resource = assignment["resource"]
             request = assignment["request"]
             route = assignment.get("route", {})
+            shelter = assignment.get("shelter") or {}
 
             record = {
                 "assignmentId": f"ASG_{uuid.uuid4().hex[:8]}",
+                "planId": self.current_plan.get("planId"),
                 "requestId": request.get("requestId"),
-                "resourceIds": [resource["resourceId"]] + ([assignment["shelter"]["resourceId"]] if assignment.get("shelter") else []),
-                "shelterId": assignment.get("shelter", {}).get("resourceId"),
+                "resourceIds": [resource["resourceId"]] + ([shelter["resourceId"]] if shelter.get("resourceId") else []),
+                "shelterId": shelter.get("resourceId"),
                 "wave": assignment.get("wave"),
                 "wave_count": assignment.get("wave_count"),
                 "status": "APPROVED",
@@ -518,6 +636,8 @@ class RescueIQOrchestrator:
             self.resource_agent.update_resource(resource["resourceId"], updates)
 
             request["status"] = "ASSIGNED"
+            if request.get("requestId"):
+                self._session_assigned_request_ids.add(request["requestId"])
             request["assignedResources"] = sorted(set(request.get("assignedResources", [])) | {resource["resourceId"]})
             # Write the status through. Keeping it in memory only meant that
             # after a restart this request reappeared as PENDING and was
@@ -544,14 +664,37 @@ class RescueIQOrchestrator:
         self._audit({"type": "plan_approved", "count": len(approved),
                      "planId": self.current_plan.get("planId"),
                      "approvedBy": approved_by, "timestamp": now})
+        self.current_plan["total_approved_assignments"] = len(self._session_assignment_ids)
+        approved_plan = {
+            "planId": self.current_plan.get("planId"),
+            "approvedAt": now,
+            "approvedBy": approved_by,
+            "requestCount": len({assignment.get("requestId") for assignment in approved}),
+            "assignmentCount": len(approved),
+            "assignments": approved,
+        }
+        self.resource_agent.save_approved_plan(approved_plan)
+        self._approved_plans = [p for p in self._approved_plans if p.get("planId") != approved_plan["planId"]]
+        self._approved_plans.append(approved_plan)
+        self._approved_plans.sort(key=lambda p: p.get("approvedAt", ""), reverse=True)
         return {
             "planId": self.current_plan.get("planId"),
             "plan_status": self.current_plan.get("status"),
             "approved_count": len(approved),
+            "total_approved_assignments": len(self._session_assignment_ids),
             "assignments": approved,
             "approvedBy": approved_by,
             "approvedAt": now,
         }
+
+    def get_approved_plans(self) -> dict:
+        # Refresh from Firestore so approvals made by another coordinator show up.
+        stored = self.resource_agent.get_approved_plans()
+        known = {plan.get("planId"): plan for plan in self._approved_plans}
+        known.update({plan.get("planId"): plan for plan in stored})
+        plans = sorted(known.values(), key=lambda plan: plan.get("approvedAt", ""), reverse=True)
+        self._approved_plans = plans
+        return {"count": len(plans), "plans": plans}
 
     def _apply_resource_update(
         self, resource_id: str, request: dict, route: dict = None
@@ -848,6 +991,7 @@ class RescueIQOrchestrator:
         self.events = []
         self._req_counter = self._req_id_base
         self._session_assignment_ids = set()
+        self._session_assigned_request_ids = set()
         reset_closed_edges = set(self.graph_data.get("closedEdges", []))
         if self.router.closed_edges != reset_closed_edges:
             self.router.revision += 1

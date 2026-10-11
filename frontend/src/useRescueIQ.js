@@ -13,6 +13,7 @@ export function useRescueIQ() {
   const [health, setHealth] = useState(null)
   const [graph, setGraph] = useState(null)
   const [requests, setRequests] = useState([])
+  const [approvedPlans, setApprovedPlans] = useState([])
   const [summary, setSummary] = useState({})
   const [plan, setPlan] = useState(null)
   const [replan, setReplan] = useState(null)
@@ -25,6 +26,7 @@ export function useRescueIQ() {
 
   const toastId = useRef(0)
   const reminderKey = useRef('')
+  const approvedRequestIds = useRef(new Set())
 
   const notify = useCallback((message, tone = 'info') => {
     const id = ++toastId.current
@@ -61,7 +63,8 @@ export function useRescueIQ() {
   const loadRequests = useCallback(async () => {
     try {
       const data = await api.requests()
-      setRequests(data?.requests ?? [])
+      setRequests((data?.requests ?? []).filter((request) =>
+        !approvedRequestIds.current.has(request.requestId)))
     } catch {
       /* polling failures stay silent; the banner already shows offline */
     }
@@ -72,6 +75,15 @@ export function useRescueIQ() {
       setSummary(await api.resourceSummary())
     } catch {
       /* same */
+    }
+  }, [])
+
+  const loadApprovedPlans = useCallback(async () => {
+    try {
+      const data = await api.approvedPlans()
+      setApprovedPlans(data?.plans ?? [])
+    } catch {
+      /* approval history is refreshed on the next poll */
     }
   }, [])
 
@@ -93,8 +105,8 @@ export function useRescueIQ() {
   }, [])
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([loadRequests(), loadSummary(), loadGraph()])
-  }, [loadRequests, loadSummary, loadGraph])
+    await Promise.all([loadRequests(), loadSummary(), loadGraph(), loadApprovedPlans()])
+  }, [loadRequests, loadSummary, loadGraph, loadApprovedPlans])
 
   // Initial load.
   useEffect(() => {
@@ -132,6 +144,7 @@ export function useRescueIQ() {
     const timer = setInterval(() => {
       loadRequests()
       loadSummary()
+      loadApprovedPlans()
       api.currentPlan().then((nextPlan) => {
         setPlan(nextPlan)
         const key = `${nextPlan.planId}:${nextPlan.approval_reminder_count ?? 0}`
@@ -144,7 +157,7 @@ export function useRescueIQ() {
       }).catch(() => {})
     }, POLL_SECONDS * 1000)
     return () => clearInterval(timer)
-  }, [loadRequests, loadSummary, notify])
+  }, [loadRequests, loadSummary, loadApprovedPlans, notify])
 
   // Closure changes are coalesced server-side for up to a minute. Poll only
   // while that batch is pending, then expose the single resulting replan.
@@ -204,8 +217,8 @@ export function useRescueIQ() {
     [run, notify, loadRequests, loadSummary],
   )
 
-  const generatePlan = useCallback(async () => {
-    const result = await run('plan', () => api.createPlan())
+  const generatePlan = useCallback(async (requestId) => {
+    const result = await run('plan', () => api.createPlan(requestId))
     if (result) {
       setPlan(result)
       setReplan(null)
@@ -227,11 +240,22 @@ export function useRescueIQ() {
         return result
       }
       notify(`${result.approved_count} assignments approved`, 'success')
-      setPlan((p) => (p ? { ...p, status: result.plan_status ?? 'APPROVED', approval_status: 'APPROVED' } : p))
-      await Promise.all([loadRequests(), loadSummary()])
+      const newlyApprovedIds = (result.assignments ?? [])
+        .map((assignment) => assignment.requestId)
+        .filter(Boolean)
+      newlyApprovedIds.forEach((requestId) => approvedRequestIds.current.add(requestId))
+      setRequests((current) => current.filter((request) =>
+        !newlyApprovedIds.includes(request.requestId)))
+      setPlan((p) => (p ? {
+        ...p,
+        status: result.plan_status ?? 'APPROVED',
+        approval_status: 'APPROVED',
+        total_approved_assignments: result.total_approved_assignments ?? p.total_approved_assignments,
+      } : p))
+      await Promise.all([loadRequests(), loadSummary(), loadApprovedPlans()])
     }
     return result
-  }, [run, notify, loadRequests, loadSummary])
+  }, [run, notify, loadRequests, loadSummary, loadApprovedPlans])
 
   const reviewPlan = useCallback(async (reason) => {
     const result = await run('reviewPlan', () => api.reviewPlan({ decision: 'reject', reason }))
@@ -306,6 +330,7 @@ export function useRescueIQ() {
     const result = await run('reset', () => api.reset())
     if (result) {
       setPlan(null)
+      approvedRequestIds.current.clear()
       setReplan(null)
       setMetrics(null)
       setLastExtraction(null)
@@ -322,6 +347,7 @@ export function useRescueIQ() {
     health,
     graph,
     requests,
+    approvedPlans,
     summary,
     plan,
     replan,

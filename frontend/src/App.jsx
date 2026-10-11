@@ -67,9 +67,11 @@ export default function App() {
             <div className="right-panel">
               <DispatchPanel
                 plan={rq.plan}
+                approvedPlans={rq.approvedPlans}
                 replan={rq.replan}
                 busy={rq.busy}
                 onGenerate={rq.generatePlan}
+                selectedRequestId={selectedId}
                 onApprove={rq.approvePlan}
                 onReject={rq.reviewPlan}
                 onApproveReplan={rq.approveReplan}

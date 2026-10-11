@@ -199,9 +199,9 @@ def resource_unavailable(resource_id: str, payload: ResourceUnavailableRequest):
 
 
 @app.post("/dispatch/plan", tags=["dispatch"])
-def dispatch_plan():
-    """Score every request/resource pair and return the proposed assignments."""
-    return unwrap(get_orchestrator().generate_dispatch_plan())
+def dispatch_plan(request_id: str | None = None):
+    """Plan one selected request, or the highest-priority pending request."""
+    return unwrap(get_orchestrator().generate_dispatch_plan(request_id=request_id))
 
 
 @app.get("/dispatch/current", tags=["dispatch"])
@@ -210,6 +210,12 @@ def dispatch_current():
     if "error" in plan:
         raise HTTPException(status_code=404, detail="No active dispatch plan")
     return plan
+
+
+@app.get("/dispatch/approved", tags=["dispatch"])
+def dispatch_approved():
+    """Plan-level history for coordinator review."""
+    return get_orchestrator().get_approved_plans()
 
 
 @app.post("/dispatch/approve", tags=["dispatch"])

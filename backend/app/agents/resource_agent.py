@@ -23,6 +23,30 @@ class ResourceAgent:
         self.mock_resources = mock_resources or []
         self.source = "unknown"
         self._reservation_lock = threading.RLock()
+        self._mock_approved_plans = {}
+
+    def save_approved_plan(self, plan: dict):
+        """Persist a plan-level approval summary for the coordinator history."""
+        plan_id = plan.get("planId")
+        if not plan_id:
+            return
+        self._mock_approved_plans[plan_id] = plan
+        if self.db:
+            try:
+                self.db.collection("approved_plans").document(plan_id).set(plan)
+            except Exception as exc:
+                print(f"Approved plan history write failed for {plan_id}: {exc}")
+
+    def get_approved_plans(self) -> list:
+        """Return persisted approval history, newest first."""
+        if self.db:
+            try:
+                plans = [doc.to_dict() for doc in self.db.collection("approved_plans").stream()]
+                return sorted(plans, key=lambda plan: plan.get("approvedAt", ""), reverse=True)
+            except Exception as exc:
+                print(f"Approved plan history read failed: {exc}")
+        return sorted(self._mock_approved_plans.values(),
+                      key=lambda plan: plan.get("approvedAt", ""), reverse=True)
 
     def reserve_plan_resources(self, assignments: list) -> dict:
         """Atomically claim every resource in a plan before writing assignments."""
@@ -55,10 +79,16 @@ class ResourceAgent:
                     @firestore.transactional
                     def reserve(txn):
                         refs = {rid: db.collection("resources").document(rid) for rid in set(loads) | set(shelter_loads)}
-                        snapshots = {rid: txn.get(ref) for rid, ref in refs.items()}
+                        # Transaction.get() yields snapshots in the Firestore
+                        # Python client; consume each iterator before reading
+                        # snapshot attributes such as `.exists`.
+                        snapshots = {
+                            rid: next(iter(txn.get(ref)), None)
+                            for rid, ref in refs.items()
+                        }
                         pending_updates = {}
                         for rid, snapshot in snapshots.items():
-                            data = snapshot.to_dict() if snapshot.exists else None
+                            data = snapshot.to_dict() if snapshot and snapshot.exists else None
                             if not data:
                                 raise ValueError(f"Resource {rid} no longer available")
                             if rid in shelter_loads:

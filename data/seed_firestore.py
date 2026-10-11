@@ -2,11 +2,38 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime
 import json
+from pathlib import Path
+import argparse
 
-#initialize
-cred = credentials.Certificate("../backend/serviceAccountKey.json")
+parser = argparse.ArgumentParser(description="Seed RescueIQ Firestore data")
+parser.add_argument(
+    "--remove-demo-requests-only",
+    action="store_true",
+    help="delete the five legacy sample requests without reseeding resources or roads",
+)
+args = parser.parse_args()
+
+# Resolve files relative to this script, regardless of the caller's cwd.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SERVICE_ACCOUNT_FILE = PROJECT_ROOT / "backend" / "serviceAccountKey.json"
+ROAD_GRAPH_FILE = Path(__file__).resolve().parent / "road_graph.json"
+
+if not SERVICE_ACCOUNT_FILE.is_file():
+    raise FileNotFoundError(
+        f"Firestore service account key not found: {SERVICE_ACCOUNT_FILE}. "
+        "Place your Firebase service account JSON at backend/serviceAccountKey.json."
+    )
+
+cred = credentials.Certificate(str(SERVICE_ACCOUNT_FILE))
 firebase_admin.initialize_app(cred)
 db = firestore.client(database_id="rescource-graph")
+
+demo_request_ids = [f"REQ_{number:03d}" for number in range(1, 6)]
+if args.remove_demo_requests_only:
+    for request_id in demo_request_ids:
+        db.collection("requests").document(request_id).delete()
+    print("Removed legacy demo requests REQ_001 through REQ_005")
+    raise SystemExit(0)
 
 print("Connected to Firestore. Seeding data...")
 
@@ -230,96 +257,15 @@ resources = [
 ]
 
 #Load the graph from file
-with open('road_graph.json', 'r') as f:
+with ROAD_GRAPH_FILE.open('r', encoding='utf-8') as f:
     road_graph = json.load(f)
 
 #Add metadata fields Firestore needs
 road_graph["lastUpdated"] = datetime.now().isoformat()
 road_graph["closedEdges"] = []  # Initialize with no closed edges
 
-#sample help requests
-requests = [
-    {
-        "requestId": "REQ_001",
-        "raw_text": "Help!! 6 people stuck on roof near City Bank Market Road, 2 children please send boat urgent",
-        "language": "English",
-        "status": "PENDING",
-        "urgency": "HIGH",
-        "people_count": 6,
-        "vulnerable": True,
-        "vulnerable_details": "2 children",
-        "location": "Market_Road",
-        "node_id": "N04",
-        "location_description": "Market Road",
-        "zone": "B",
-        "needs": ["evacuation"],
-        "timestamp": datetime.now().isoformat()
-    },
-    {
-        "requestId": "REQ_002",
-        "raw_text": "मेरे घर में पानी भर गया है, 4 लोग हैं, बुजुर्ग माँ है चल नहीं सकती, Ward 7 मंदिर के पास",
-        "language": "Hindi",
-        "status": "PENDING",
-        "urgency": "CRITICAL",
-        "people_count": 4,
-        "vulnerable": True,
-        "vulnerable_details": "elderly woman, cannot walk",
-        "location": "Ward_7",
-        "node_id": "N05",
-        "location_description": "Ward 7",
-        "zone": "B",
-        "needs": ["evacuation", "medical"],
-        "timestamp": datetime.now().isoformat()
-    },
-    {
-        "requestId": "REQ_003",
-        "raw_text": "உதவி தேவை, நாங்கள் 5 பேர் மாட்டிக்கொண்டோம், குழந்தைகள் இருக்கிறார்கள், Ward 3",
-        "language": "Tamil",
-        "status": "PENDING",
-        "urgency": "HIGH",
-        "people_count": 5,
-        "vulnerable": True,
-        "vulnerable_details": "children present",
-        "location": "Ward_3",
-        "node_id": "N03",
-        "location_description": "Ward 3",
-        "zone": "A",
-        "needs": ["evacuation"],
-        "timestamp": datetime.now().isoformat()
-    },
-    {
-        "requestId": "REQ_004",
-        "raw_text": "HELP ward7 paani bahut zyada 3 log please boat jaldi",
-        "language": "Mixed",
-        "status": "PENDING",
-        "urgency": "HIGH",
-        "people_count": 3,
-        "vulnerable": False,
-        "vulnerable_details": "",
-        "location": "Ward_7",
-        "node_id": "N05",
-        "location_description": "Ward 7",
-        "zone": "B",
-        "needs": ["evacuation"],
-        "timestamp": datetime.now().isoformat()
-    },
-    {
-        "requestId": "REQ_005",
-        "raw_text": "Diabetic patient needs insulin emergency Ward 9 ground floor flooding fast",
-        "language": "English",
-        "status": "PENDING",
-        "urgency": "CRITICAL",
-        "people_count": 1,
-        "vulnerable": True,
-        "vulnerable_details": "diabetic patient, needs insulin",
-        "location": "Ward_9",
-        "node_id": "N06",
-        "location_description": "Ward 9",
-        "zone": "B",
-        "needs": ["medical", "evacuation"],
-        "timestamp": datetime.now().isoformat()
-    },
-]
+# Sample requests are intentionally not seeded; the queue should contain only actual intake.
+requests = []
 
 #write to firestore
 print("Seeding resources...")
@@ -335,12 +281,10 @@ db.collection("road_graph").document(
 ).set(road_graph)
 print(f"{len(road_graph['nodes'])} nodes and {len(road_graph['edges'])} edges added")
 
-print("Seeding sample requests...")
-for req in requests:
-    db.collection("requests").document(
-        req["requestId"]
-    ).set(req)
-print(f"{len(requests)} requests added")
+print("Removing legacy sample requests...")
+for request_id in demo_request_ids:
+    db.collection("requests").document(request_id).delete()
+print(f"Removed {len(demo_request_ids)} legacy demo requests; no sample requests were added")
 
 print("\nFirestore seeding complete!")
 print(f"Resources: {len(resources)}")

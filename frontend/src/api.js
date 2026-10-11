@@ -85,8 +85,12 @@ export const api = {
   releaseAllResources: () =>
     request('/resources/release-all', { method: 'POST' }),
 
-  createPlan: () => request('/dispatch/plan', { method: 'POST' }),
+  createPlan: (requestId) => request(
+    `/dispatch/plan${requestId ? `?request_id=${encodeURIComponent(requestId)}` : ''}`,
+    { method: 'POST' },
+  ),
   currentPlan: () => request('/dispatch/current'),
+  approvedPlans: () => request('/dispatch/approved'),
   approvePlan: (approvedBy = 'coordinator') =>
     request('/dispatch/approve', {
       method: 'POST',

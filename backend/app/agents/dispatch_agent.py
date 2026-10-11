@@ -13,25 +13,29 @@ from app.optimizer.constraints import ConstraintEngine
 
 
 class DispatchAgent:
+
     def __init__(self, router: DistrictRouter, resources: list):
         self.router = router
         self.resources = resources
         self.constraints = ConstraintEngine()
         self.model = None if MOCK_MODE else gemini_model()
 
-    def create_plan(self, requests: list, exclude_resource_ids: set | None = None) -> dict:
-        # Sort by urgency and vulnerability
+    def prioritize_requests(self, requests: list, exclude_resource_ids: set | None = None) -> list:
+        """Use the dispatch ranking so a coordinator can plan one case at a time."""
         priority_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+        excluded = exclude_resource_ids or set()
+
         def minimum_eta(request):
             node = request_node(request)
             etas = [self.router.shortest_path(resource_node(r), node).get("minutes", 10**9)
                     for r in self.resources if r.get("available", False)
                     and r.get("type") in DISPATCHABLE_TYPES and node
+                    and r.get("resourceId") not in excluded
                     and str(r.get("fuelLevel", "")).lower() != "low"
                     and r.get("operatorReachable", True) is not False
                     and r.get("status", "").upper() not in ("UNAVAILABLE", "BROKEN", "OFFLINE")]
             return min(etas, default=10**9)
-        sorted_requests = sorted(
+        return sorted(
             requests,
             key=lambda r: (
                 priority_order.get(normalize_urgency(r.get("urgency")), 3),
@@ -41,6 +45,9 @@ class DispatchAgent:
                 r.get("requestId", ""),
             )
         )
+
+    def create_plan(self, requests: list, exclude_resource_ids: set | None = None) -> dict:
+        sorted_requests = self.prioritize_requests(requests, exclude_resource_ids)
 
         available_resources = [
             r for r in self.resources

@@ -60,41 +60,57 @@ class RescueIQOrchestrator:
         self._plan_reminders = {}
         self._session_assignment_ids = set()
         self._session_assigned_request_ids = set()
-        # Request ids are handed out under a lock: `+=` is not atomic, and
-        # FastAPI runs sync endpoints on a threadpool, so two concurrent
-        # intake calls could mint the same id and .set() would overwrite one
-        # live emergency with the other.
-        self._id_lock = threading.Lock()
-        self._id_scan_failed = False
-        # Seeded demo requests already occupy REQ_001.. in Firestore. Start
-        # above them so a live run never overwrites (and reset never deletes)
-        # the fixtures the seed script created.
-        self._req_id_base = self._highest_seeded_request_number()
-        self._req_counter = self._req_id_base
+        self.current_requests = self.resource_agent.get_active_requests()
+        self._active_assignments = self._restore_active_assignments(
+            self.resource_agent.get_active_assignments()
+        )
+        self._session_assignment_ids.update(
+            assignment["assignmentId"]
+            for assignment in self._active_assignments
+            if assignment.get("assignmentId")
+        )
 
-    def _highest_seeded_request_number(self) -> int:
-        if not self.db:
-            return 0
-        try:
-            highest = 0
-            for doc in self.db.collection("requests").stream():
-                match = re.fullmatch(r"REQ_(\d+)", doc.id)
-                if match:
-                    highest = max(highest, int(match.group(1)))
-            return highest
-        except Exception as e:
-            # Returning 0 here would restart numbering at REQ_001 and
-            # overwrite existing documents. Switch to opaque ids instead.
-            print(f"Could not scan existing request ids ({e}); using opaque ids")
-            self._id_scan_failed = True
-            return 0
+    def _restore_active_assignments(self, records: list) -> list:
+        requests = {item.get("requestId"): item for item in self.current_requests}
+        resources = {item.get("resourceId"): item for item in self.resources}
+        restored = []
+        for record in records:
+            resource_ids = record.get("resourceIds") or []
+            resource_id = resource_ids[0] if resource_ids else None
+            request_id = record.get("requestId")
+            resource = resources.get(resource_id)
+            request = requests.get(request_id)
+            if not resource or not request:
+                continue
+            shelter_id = record.get("shelterId")
+            shelter = resources.get(shelter_id) if shelter_id else None
+            restored.append({
+                "assignmentId": record.get("assignmentId"),
+                "request": request,
+                "resource": resource,
+                "shelter": shelter,
+                "route": record.get("route_details") or {
+                    "path": record.get("route", []),
+                    "edges": [],
+                    "minutes": record.get("eta_minutes", 0),
+                },
+                "shelter_route": record.get("shelter_route_details"),
+                "wave": record.get("wave"),
+                "wave_people": record.get(
+                    "shelter_people",
+                    request.get("people_count", 0),
+                ),
+                "status": record.get("status", "APPROVED"),
+                "coverage_status": record.get("coverage_status", "APPROVED"),
+                "approval_status": "APPROVED",
+                "mission_status": record.get("mission_status", "EN_ROUTE"),
+            })
+        return restored
 
     def _next_request_id(self) -> str:
-        if self._id_scan_failed:
-            return f"REQ_{uuid.uuid4().hex[:8].upper()}"
-        with self._id_lock:
-            self._req_counter += 1
-            return f"REQ_{self._req_counter:03d}"
+        # IDs must remain unique across processes and service instances; a
+        # startup scan plus a process-local counter cannot guarantee that.
+        return f"REQ_{uuid.uuid4().hex.upper()}"
 
     def _connect_firestore(self):
         try:
@@ -322,7 +338,7 @@ class RescueIQOrchestrator:
 
     def _release_cancelled_assignment(self, request: dict):
         released = set()
-        for assignment in (self.current_plan or {}).get("assignments", []):
+        for assignment in self._tracked_assignments():
             if assignment.get("request", {}).get("requestId") != request.get("requestId"):
                 continue
             resource = assignment.get("resource", {})
@@ -334,10 +350,71 @@ class RescueIQOrchestrator:
                     if item.get("resourceId") == rid:
                         item.update(updates)
                 released.add(rid)
+            result = self._release_shelter_reservations([assignment])
+            if not result.get("ok"):
+                self._audit({"type": "shelter_reservation_release_failed",
+                             "requestId": request.get("requestId"),
+                             "reason": result.get("reason"),
+                             "timestamp": datetime.now(timezone.utc).isoformat()})
             assignment["status"] = "CANCELLED" if request.get("status") in ("CANCELLED", "COMPLETED") else "SUPERSEDED"
+            self.resource_agent.update_assignment(
+                assignment.get("assignmentId"),
+                {"status": assignment["status"]},
+            )
         if released:
             self._audit({"type": "assignment_resources_released", "requestId": request.get("requestId"),
                          "resourceIds": sorted(released), "timestamp": datetime.now(timezone.utc).isoformat()})
+
+    def _tracked_assignments(self) -> list:
+        """Return active history and current draft assignments without duplicates."""
+        assignments = list(self._active_assignments)
+        known_ids = {
+            assignment.get("assignmentId")
+            for assignment in assignments
+            if assignment.get("assignmentId")
+        }
+        known_objects = {id(assignment) for assignment in assignments}
+        for assignment in (self.current_plan or {}).get("assignments", []):
+            assignment_id = assignment.get("assignmentId")
+            if (id(assignment) not in known_objects
+                    and (not assignment_id or assignment_id not in known_ids)):
+                assignments.append(assignment)
+                known_objects.add(id(assignment))
+                if assignment_id:
+                    known_ids.add(assignment_id)
+        return assignments
+
+    def _release_shelter_reservations(self, assignments: list) -> dict:
+        reservations = {}
+        for assignment in assignments:
+            if (assignment.get("approval_status") != "APPROVED"
+                    or assignment.get("status") in (
+                        "COMPLETED", "CANCELLED", "SUPERSEDED", "UNAVAILABLE"
+                    )
+                    or assignment.get("mission_status") == "DELIVERED"):
+                continue
+            shelter_id = (assignment.get("shelter") or {}).get("resourceId")
+            if not shelter_id:
+                continue
+            people = assignment.get(
+                "wave_people",
+                assignment.get("request", {}).get("people_count", 0),
+            ) or 0
+            reservations[shelter_id] = reservations.get(shelter_id, 0) + people
+        if not reservations:
+            return {"ok": True, "updates": {}}
+
+        result = self.resource_agent.release_shelter_reservations(reservations)
+        if result.get("ok"):
+            for resource_id, updates in result.get("updates", {}).items():
+                local = next(
+                    (item for item in self.resources
+                     if item.get("resourceId") == resource_id),
+                    None,
+                )
+                if local:
+                    local.update(updates)
+        return result
 
     def process_intake_batch(self, messages: list) -> list:
         """Per-message isolation: one bad message must not drop the rest."""
@@ -367,6 +444,70 @@ class RescueIQOrchestrator:
         if status:
             requests = [r for r in requests if r.get("status") == status]
         return requests
+
+    def review_request(self, request_id: str, updates: dict,
+                       reviewed_by: str = "coordinator") -> dict:
+        with self._approval_lock:
+            return self._review_request_locked(request_id, updates, reviewed_by)
+
+    def _review_request_locked(self, request_id: str, updates: dict,
+                               reviewed_by: str) -> dict:
+        """Correct an uncertain extraction and explicitly return it to queue."""
+        if not self.current_requests:
+            self.current_requests = self.resource_agent.get_active_requests()
+        request = next(
+            (item for item in self.current_requests
+             if item.get("requestId") == request_id),
+            None,
+        )
+        if request is None:
+            return {"error": f"Request '{request_id}' was not found"}
+        if request.get("status") not in ("UNPROCESSED", "PENDING", "UNREACHABLE"):
+            return {"error": f"Request '{request_id}' is not awaiting review"}
+
+        allowed_fields = {
+            "people_count", "urgency", "vulnerable", "vulnerable_details",
+            "needs", "node_id", "location_description",
+        }
+        if not isinstance(updates, dict) or set(updates) - allowed_fields:
+            return {"error": "Review contains unsupported request fields"}
+        people_count = updates.get("people_count", request.get("people_count"))
+        node_id = updates.get("node_id", request.get("node_id"))
+        if not isinstance(people_count, int) or isinstance(people_count, bool) or people_count <= 0:
+            return {"error": "A positive people_count is required before queueing"}
+        if node_id not in config.NODE_IDS:
+            return {"error": "A known node_id is required before queueing"}
+        if ("urgency" in updates
+                and config.normalize_urgency(updates["urgency"]) != str(updates["urgency"]).upper()):
+            return {"error": "Urgency must be CRITICAL, HIGH, MEDIUM, or LOW"}
+        if "vulnerable" in updates and not isinstance(updates["vulnerable"], bool):
+            return {"error": "vulnerable must be a boolean"}
+        if "needs" in updates and (
+            not isinstance(updates["needs"], list)
+            or any(item not in ("evacuation", "medical", "food", "shelter", "water")
+                   for item in updates["needs"])
+        ):
+            return {"error": "needs must contain only supported services"}
+
+        request.update(updates)
+        request.update({
+            "status": "PENDING",
+            "human_review_required": False,
+            "processing_flags": [],
+            "reviewedBy": reviewed_by,
+            "reviewedAt": datetime.now(timezone.utc).isoformat(),
+        })
+        self.resource_agent.update_request(request_id, {
+            **updates,
+            "status": "PENDING",
+            "human_review_required": False,
+            "processing_flags": [],
+            "reviewedBy": request["reviewedBy"],
+            "reviewedAt": request["reviewedAt"],
+        })
+        self._audit({"type": "request_reviewed", "requestId": request_id,
+                     "reviewedBy": reviewed_by, "timestamp": request["reviewedAt"]})
+        return request
 
     # ---------- dispatch ----------
 
@@ -637,11 +778,19 @@ class RescueIQOrchestrator:
                 "shelterId": shelter.get("resourceId"),
                 "wave": assignment.get("wave"),
                 "wave_count": assignment.get("wave_count"),
+                "shelter_people": assignment.get(
+                    "wave_people",
+                    request.get("people_count", 0),
+                ),
+                "coverage_status": assignment.get("status", "APPROVED"),
                 "status": "APPROVED",
+                "mission_status": "EN_ROUTE",
                 "eta_minutes": route.get("minutes"),
                 "shelter_eta_minutes": assignment.get("shelter_eta_minutes"),
                 "total_eta_minutes": assignment.get("total_eta_minutes"),
                 "route": route.get("path", []),
+                "route_details": route,
+                "shelter_route_details": assignment.get("shelter_route"),
                 "explanation": assignment.get("explanation", ""),
                 "approvedBy": approved_by,
                 "approvedAt": now,
@@ -670,6 +819,8 @@ class RescueIQOrchestrator:
                 },
             )
             assignment["approval_status"] = "APPROVED"
+            assignment["assignmentId"] = record["assignmentId"]
+            assignment["coverage_status"] = assignment.get("status", "APPROVED")
             if assignment.get("status") != "PARTIAL":
                 assignment["status"] = "APPROVED"
             # Approval dispatches the vehicle; it is now travelling, not done.
@@ -678,6 +829,7 @@ class RescueIQOrchestrator:
             # from one about to arrive, and a replan could not know whether
             # the people were already aboard.
             assignment["mission_status"] = "EN_ROUTE"
+            self._active_assignments.append(assignment)
             approved.append(record)
 
         self.current_plan["approval_status"] = "APPROVED"
@@ -754,8 +906,13 @@ class RescueIQOrchestrator:
             )
 
         with self._approval_lock:
-            matches = [a for a in (self.current_plan or {}).get("assignments", [])
-                       if a.get("request", {}).get("requestId") == request_id]
+            matches = [
+                a for a in self._tracked_assignments()
+                if a.get("request", {}).get("requestId") == request_id
+                and a.get("status") not in (
+                    "COMPLETED", "CANCELLED", "SUPERSEDED", "UNAVAILABLE"
+                )
+            ]
             if not matches:
                 return {"error": f"No assignment found for request '{request_id}'"}
             if any(a.get("approval_status") != "APPROVED" for a in matches):
@@ -775,6 +932,10 @@ class RescueIQOrchestrator:
                 # makes a later closure on the drop-off leg urgent.
                 match["mission_status"] = "ABOARD" if match.get("shelter") else "AT_SCENE"
                 match["picked_up_at"] = now
+                self.resource_agent.update_assignment(
+                    match.get("assignmentId"),
+                    {"mission_status": match["mission_status"], "picked_up_at": now},
+                )
                 resource = match["resource"]
                 resource["currentNode"] = at_node
                 self.resource_agent.update_resource(
@@ -848,16 +1009,23 @@ class RescueIQOrchestrator:
         resource was effectively consumed by its first assignment and the
         fleet drained over a demo.
         """
-        if not self.current_plan:
-            return {"error": "No active dispatch plan"}
-
-        matches = [a for a in self.current_plan.get("assignments", [])
-                   if a.get("request", {}).get("requestId") == request_id]
-        if not matches:
+        all_matches = [a for a in self._tracked_assignments()
+                       if a.get("request", {}).get("requestId") == request_id]
+        if not all_matches:
             return {"error": f"No assignment found for request '{request_id}'"}
-        if all(a.get("status") == "COMPLETED" for a in matches):
+        if all(a.get("status") == "COMPLETED" for a in all_matches):
             return {"error": f"{request_id} is already completed"}
-        if any(a.get("status") not in ("APPROVED", "PARTIAL") or a.get("approval_status") not in (None, "APPROVED") for a in matches):
+        matches = [
+            assignment for assignment in all_matches
+            if assignment.get("status") not in (
+                "COMPLETED", "CANCELLED", "SUPERSEDED", "UNAVAILABLE"
+            )
+        ]
+        if not matches:
+            return {"error": f"{request_id} has no active assignment"}
+        if any(a.get("approval_status") != "APPROVED"
+               or a.get("status") in ("BLOCKED", "RETURNING", "CANCELLED", "UNAVAILABLE")
+               for a in matches):
             return {"error": f"{request_id} has not been approved yet"}
         now = datetime.now(timezone.utc).isoformat()
         released = []
@@ -885,6 +1053,11 @@ class RescueIQOrchestrator:
             match["status"] = "COMPLETED"
             match["mission_status"] = "DELIVERED"
             match["delivered_at"] = now
+            self.resource_agent.update_assignment(
+                match.get("assignmentId"),
+                {"status": "COMPLETED", "mission_status": "DELIVERED",
+                 "delivered_at": now},
+            )
             released.append({"resourceId": resource["resourceId"], "currentNode": arrived_at})
         matches[0]["request"]["status"] = "COMPLETED"
         self.resource_agent.update_request(
@@ -920,7 +1093,7 @@ class RescueIQOrchestrator:
             })
             is_shelter = resource.get("type") == "shelter"
             affected = []
-            prior_assignments = (self.current_plan or {}).get("assignments", [])
+            prior_assignments = self._tracked_assignments()
             for assignment in prior_assignments:
                 # A shelter is named in `shelter`, not `resource`. Matching
                 # only on `resource` meant a flooded shelter was marked
@@ -933,6 +1106,9 @@ class RescueIQOrchestrator:
                 if assignment.get("status") in ("COMPLETED", "CANCELLED", "UNAVAILABLE"):
                     continue
                 assignment["status"] = "UNAVAILABLE"
+                self.resource_agent.update_assignment(
+                    assignment.get("assignmentId"), {"status": "UNAVAILABLE"}
+                )
                 req = assignment.get("request", {})
                 req["status"] = "PENDING"
                 req.pop("assignedResources", None)
@@ -1027,7 +1203,7 @@ class RescueIQOrchestrator:
                 self._closure_deadline = None
             if not changed_edges or not self.current_plan:
                 return
-            assignments = self.current_plan.get("assignments", [])
+            assignments = self._tracked_assignments()
             try:
                 result = self.replan.simulate_road_closure(
                     changed_edges, assignments, already_applied=True, replan_all=True
@@ -1068,8 +1244,29 @@ class RescueIQOrchestrator:
                 resource["destinationNode"] = destination
                 self.resource_agent.update_resource(resource.get("resourceId"), {"destinationNode": destination})
                 updated += 1
+            if (assignment.get("approval_status") == "APPROVED"
+                    and assignment.get("status") in ("REPLANNED", "UNCHANGED")):
+                assignment["status"] = assignment.get("coverage_status", "APPROVED")
+            if assignment.get("approval_status") == "APPROVED":
+                self.resource_agent.update_assignment(
+                    assignment.get("assignmentId"),
+                    {
+                        "status": assignment.get("status"),
+                        "route_details": assignment.get("route"),
+                        "mission_status": assignment.get("mission_status"),
+                    },
+                )
 
         self.current_plan["assignments"] = self.last_replan["assignments"]
+        replanned_by_id = {
+            assignment.get("assignmentId"): assignment
+            for assignment in self.last_replan["assignments"]
+            if assignment.get("assignmentId")
+        }
+        for index, assignment in enumerate(self._active_assignments):
+            updated_assignment = replanned_by_id.get(assignment.get("assignmentId"))
+            if updated_assignment:
+                self._active_assignments[index] = updated_assignment
         self.current_plan["graph_revision"] = self.router.revision
         self.current_plan["status"] = "APPROVED" if all(a.get("status") not in ("BLOCKED", "RETURNING") for a in self.current_plan["assignments"]) else "PARTIAL"
         self._audit({"type": "replan_approved", "approvedBy": approved_by,
@@ -1136,6 +1333,10 @@ class RescueIQOrchestrator:
     # ---------- lifecycle ----------
 
     def reset(self) -> dict:
+        with self._approval_lock:
+            return self._reset_locked()
+
+    def _reset_locked(self) -> dict:
         """Back to a clean demo state: no requests, no plan, roads reopened.
 
         Must write through to Firestore. Restoring only the in-memory copy
@@ -1152,6 +1353,12 @@ class RescueIQOrchestrator:
         # Clear the collection rather than the in-memory ids: requests stored
         # under an auto-id, and statuses that never enter the queue, both
         # survived the old by-requestId delete and reappeared next run.
+        released_shelters = self._release_shelter_reservations(
+            self._active_assignments
+        )
+        if not released_shelters.get("ok"):
+            return {"error": "Could not release outstanding shelter reservations: "
+                             + released_shelters.get("reason", "unknown error")}
         removed_requests = self.resource_agent.delete_all_requests()
         removed_assignments = self.resource_agent.delete_docs(
             "assignments", list(self._session_assignment_ids)
@@ -1161,13 +1368,10 @@ class RescueIQOrchestrator:
 
         self.current_requests = []
         self.current_plan = None
+        self._active_assignments = []
         self.last_replan = None
         self._plan_reminders.clear()
         self.events = []
-        # Every request document is gone, so numbering starts over at
-        # REQ_001 instead of continuing past ids nothing holds any more.
-        self._req_id_base = 0
-        self._req_counter = 0
         self._session_assignment_ids = set()
         self._session_assigned_request_ids = set()
         reset_closed_edges = set(self.graph_data.get("closedEdges", []))

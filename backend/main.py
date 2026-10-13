@@ -8,9 +8,13 @@ Run locally:  uvicorn main:app --reload --port 8080
 Docs:         http://localhost:8080/docs
 """
 from contextlib import asynccontextmanager
+import os
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app import config
@@ -48,6 +52,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+frontend_dist = Path(
+    os.getenv(
+        "FRONTEND_DIST",
+        str(Path(__file__).resolve().parent.parent / "frontend" / "dist"),
+    )
+)
+if (frontend_dist / "assets").is_dir():
+    app.mount(
+        "/assets",
+        StaticFiles(directory=frontend_dist / "assets"),
+        name="frontend-assets",
+    )
+
 
 def get_orchestrator() -> RescueIQOrchestrator:
     if orchestrator is None:
@@ -68,6 +85,16 @@ def unwrap(result: dict) -> dict:
 class IntakeRequest(BaseModel):
     message: str = Field(..., min_length=1, description="Raw help message, any language")
     media_type: str = Field(default="text", description="text, audio, or image; unsupported media is held for human review")
+
+
+class RequestReviewRequest(BaseModel):
+    people_count: int = Field(..., gt=0)
+    node_id: str
+    urgency: str = "MEDIUM"
+    vulnerable: bool = False
+    vulnerable_details: str = ""
+    needs: list[str] = Field(default_factory=list)
+    location_description: str | None = None
 
 
 class BatchIntakeRequest(BaseModel):
@@ -127,6 +154,9 @@ def health():
 
 @app.get("/", tags=["meta"])
 def root():
+    index = frontend_dist / "index.html"
+    if index.is_file():
+        return FileResponse(index)
     return {"service": "RescueIQ API", "docs": "/docs", "health": "/health"}
 
 
@@ -178,6 +208,15 @@ def list_requests():
 def pending_requests():
     reqs = get_orchestrator().get_requests(status="PENDING")
     return {"count": len(reqs), "requests": reqs}
+
+
+@app.patch("/requests/{request_id}/review", tags=["intake"])
+def review_request(request_id: str, payload: RequestReviewRequest):
+    """Apply coordinator corrections and queue a reviewed request."""
+    return unwrap(get_orchestrator().review_request(
+        request_id,
+        payload.model_dump(exclude_unset=True, exclude_none=True),
+    ))
 
 
 # ---------- resources ----------
@@ -317,7 +356,7 @@ def reset():
 
     Writes through to Firestore so the next run starts with a full fleet.
     """
-    return get_orchestrator().reset()
+    return unwrap(get_orchestrator().reset())
 
 
 @app.post("/resources/release-all", tags=["resources"])

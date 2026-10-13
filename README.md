@@ -64,15 +64,24 @@ Firestore degrades the same way: if credentials are missing, the orchestrator
 falls back to an in-memory resource list and logs that it did. The API stays
 fully functional.
 
-### Model choice
+### Model choice and cost
 
-Verified working: **`gemini-2.5-flash`** in `us-central1` on project
-`resourceworkflow`, via the `google-genai` SDK.
+Live Gemini defaults to **`gemini-3-flash-preview`** through the Vertex AI
+**`global`** endpoint. Gemini 3 Flash is currently a public preview model; its
+latency, availability, and pricing may differ from Gemini 2.5 Flash-Lite.
+These settings can be overridden with `GEMINI_MODEL` and `VERTEX_LOCATION`.
+Gemini 3 uses `GEMINI_THINKING_LEVEL` (`LOW` by default); Gemini 2.5 models use
+`GEMINI_THINKING_BUDGET`.
 
-`gemini-2.0-flash` is retired and returns `404 NOT_FOUND` on this project.
-`gemini-3.x` models appear in `models.list()` but are not enabled for it. If
-you see a 404 naming a publisher model, the model is the problem, not your
-credentials -- an auth failure would be 401/403.
+This model/location choice does **not** cap spend or guarantee that requests
+will fit within free credits. Vertex AI usage is billed according to token
+usage and current pricing; configure a Google Cloud billing budget and alerts,
+and monitor usage. Budget alerts are notifications, not a hard spending cap.
+To guarantee this app makes no Gemini calls, run with `MOCK_MODE=true`.
+
+Preview access can depend on your project and endpoint. If the configured
+model is unavailable to your project, Vertex AI will return a model/location
+error; verify current project access and model availability before deployment.
 
 The agents talk to Gemini through `config.gemini_model()`, which wraps the
 Gen AI SDK in the `generate_content(prompt).text` shape the agents expect.
@@ -82,7 +91,8 @@ Changing SDK or model is a one-file change.
 
 | Variable | Default | Why |
 |---|---|---|
-| `GEMINI_THINKING_BUDGET` | `0` | `gemini-2.5-flash` deliberates by default, which cost ~15s per narration call and pushed a dispatch plan past 20 seconds. Extraction and narration are both shallow here; measured output is identical with thinking off. Set `-1` to restore the model default. |
+| `GEMINI_THINKING_LEVEL` | `LOW` | Gemini 3 reasoning level; lower levels are intended to reduce reasoning latency. |
+| `GEMINI_THINKING_BUDGET` | `0` | Gemini 2.5 thinking token budget. Set `-1` to restore that model family's default. |
 | `GEMINI_TIMEOUT_SECONDS` | `30` | Caps a Vertex call that would otherwise hang an endpoint with no bound. Every agent has a fallback path. |
 | `REPLAN_DEBOUNCE_SECONDS` | `3` | Seconds of quiet before batched road changes trigger one replan. Low for demos; a real control room would want it higher. |
 
@@ -103,6 +113,7 @@ Base URL `http://localhost:8080`. Full schema at `/docs`.
 | POST | `/intake/batch` | Several messages at once |
 | GET | `/requests` | All requests |
 | GET | `/requests/pending` | Requests not yet assigned |
+| PATCH | `/requests/{request_id}/review` | Correct an uncertain extraction and queue it after coordinator review |
 | GET | `/resources` | Resource list, filterable by `type` / `available_only` |
 | GET | `/resources/summary` | Totals and availability per type (dashboard tiles) |
 | POST | `/resources/release-all` | Force every resource back to available (recovery) |
@@ -239,36 +250,68 @@ dispatcher sent the wrong resources.
 
 ---
 
-## Deploying to Cloud Run
+## Deploying the full app to Cloud Run
 
-Run from the repo root, once `gcloud` is installed and authenticated:
+**Cloud Run is the simplest option for this project.** One service serves the
+React coordinator console and FastAPI endpoints at the same URL. The Docker
+build compiles the frontend and includes it in the existing backend image;
+the frontend automatically sends API calls to that same Cloud Run service.
+Firebase Hosting would require a separately deployed API and CORS
+configuration.
+
+From the repository root, install the Google Cloud CLI and authenticate with
+`gcloud auth login`. Set your own project ID in PowerShell:
 
 ```powershell
-gcloud config set project resourceworkflow
+$PROJECT_ID = "your-google-cloud-project-id"
+gcloud config set project $PROJECT_ID
 
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com `
-  aiplatform.googleapis.com firestore.googleapis.com
-
-gcloud builds submit --tag gcr.io/resourceworkflow/rescueiq-api .
-
-gcloud run deploy rescueiq-api `
-  --image gcr.io/resourceworkflow/rescueiq-api `
-  --region us-central1 `
-  --platform managed `
-  --allow-unauthenticated `
-  --port 8080 `
-  --memory 1Gi `
-  --min-instances 1 `
-  --set-env-vars "MOCK_MODE=false,GOOGLE_CLOUD_PROJECT=resourceworkflow,VERTEX_LOCATION=us-central1,FIRESTORE_DATABASE=rescource-graph,CORS_ORIGINS=*"
+  artifactregistry.googleapis.com aiplatform.googleapis.com
 ```
 
-The container honours Cloud Run's injected `$PORT`. The service account needs
-**Vertex AI User** and **Cloud Datastore User** roles.
+Grant the Cloud Run runtime service account permission to call Vertex AI, then
+build and deploy the app:
+
+```powershell
+$PROJECT_NUMBER = gcloud projects describe $PROJECT_ID --format="value(projectNumber)"
+$RUNTIME_SERVICE_ACCOUNT = "$PROJECT_NUMBER-compute@developer.gserviceaccount.com"
+gcloud projects add-iam-policy-binding $PROJECT_ID `
+  --member="serviceAccount:$RUNTIME_SERVICE_ACCOUNT" `
+  --role="roles/aiplatform.user"
+
+gcloud run deploy rescueiq `
+  --source . `
+  --region us-central1 `
+  --allow-unauthenticated `
+  --memory 1Gi `
+  --min 0 `
+  --max 1 `
+  --set-env-vars "MOCK_MODE=false,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=global,GEMINI_MODEL=gemini-3-flash-preview,GEMINI_THINKING_LEVEL=LOW"
+```
+
+The deploy command prints the public service URL. Open it to use the console;
+append `/docs` for the API documentation and `/health` to check service status.
+Live Gemini requests use Vertex AI and are billed according to current Google
+Cloud pricing. Check model availability for your project and region, and set
+up billing budgets and alerts before use. Budget alerts do not cap spending.
+
+The initial deployment uses the built-in demo fleet in memory. Requests,
+plans, and closures can be lost when Cloud Run scales to zero or restarts the
+instance. For persistent data, create/configure the Firestore database named
+by `FIRESTORE_DATABASE`, grant the runtime service account
+**Cloud Datastore User** (`roles/datastore.user`), and seed that database
+before using it for a demo. Do not put service-account key files in the
+container or repository; Cloud Run uses its runtime service account.
+
+This prototype is publicly reachable and does not include user
+authentication. Use sample data only; do not send real emergency or personal
+information. Do not treat it as an operational dispatch system.
 
 Smoke test the deployment against the same suite used locally:
 
 ```powershell
-$env:RESCUEIQ_API="https://<your-service-url>"
+$env:RESCUEIQ_API = "https://<your-service-url>"
 .\backend\venv\Scripts\python.exe backend\test_api.py
 ```
 

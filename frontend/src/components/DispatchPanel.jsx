@@ -1,3 +1,5 @@
+import { formatRequestId } from '../formatters'
+
 export default function DispatchPanel({
   plan,
   replan,
@@ -6,8 +8,8 @@ export default function DispatchPanel({
   onApprove,
   onReject,
   onApproveReplan,
+  onReportProgress,
   onSelectRequest,
-  selectedRequestId,
   approvedPlans = [],
 }) {
   // After a closure the replan result is the live view of the plan.
@@ -57,7 +59,13 @@ export default function DispatchPanel({
         ) : (
           <>
             {assignments.map((a, i) => (
-              <AssignmentCard key={a.resource?.resourceId ?? i} a={a} onSelect={onSelectRequest} />
+              <AssignmentCard
+                key={a.assignmentId ?? a.resource?.resourceId ?? i}
+                a={a}
+                busy={busy[`progress:${a.request?.requestId}`]}
+                onSelect={onSelectRequest}
+                onReportProgress={onReportProgress}
+              />
             ))}
 
             {unassigned.length > 0 && (
@@ -68,7 +76,9 @@ export default function DispatchPanel({
                 {unassigned.map((req) => (
                   <div className="ac blocked" key={req.requestId}>
                     <div className="ac-top">
-                      <span className="ac-name">{req.requestId}</span>
+                      <span className="ac-name" title={req.requestId}>
+                        {formatRequestId(req.requestId)}
+                      </span>
                       <span className={`badge badge-${req.urgency}`}>{req.urgency}</span>
                     </div>
                     <div className="ac-sub">
@@ -114,7 +124,10 @@ export default function DispatchPanel({
               </div>
               {(approvedPlan.assignments ?? []).map((assignment, index) => (
                 <div className="approved-plan-assignment" key={assignment.assignmentId ?? `${approvedPlan.planId}-${index}`}>
-                  {assignment.requestId || 'Request'} → {(assignment.resourceIds ?? []).join(', ') || 'Resource'}
+                  <span title={assignment.requestId}>
+                    {formatRequestId(assignment.requestId)}
+                  </span>
+                  {' → '}{(assignment.resourceIds ?? []).join(', ') || 'Resource'}
                   {assignment.wave && ` · wave ${assignment.wave}/${assignment.wave_count ?? '?'}`}
                 </div>
               ))}
@@ -125,9 +138,9 @@ export default function DispatchPanel({
 
       <div className="rp-foot">
         <div className="foot-btns">
-          <button className="ghost-btn" onClick={() => onGenerate(selectedRequestId)} disabled={busy.plan || awaitingApproval}
+          <button className="ghost-btn" onClick={() => onGenerate()} disabled={busy.plan || awaitingApproval}
                   style={{ flex: 1 }}>
-            {busy.plan ? <><span className="spinner" /> Planning…</> : awaitingApproval ? 'Plan awaiting approval' : selectedRequestId ? 'Plan selected request' : 'Plan next request'}
+            {busy.plan ? <><span className="spinner" /> Planning…</> : awaitingApproval ? 'Plan awaiting approval' : 'Plan all pending requests'}
           </button>
 
           {replan ? (
@@ -158,13 +171,18 @@ export default function DispatchPanel({
   )
 }
 
-function AssignmentCard({ a, onSelect }) {
+function AssignmentCard({ a, busy, onSelect, onReportProgress }) {
   const route = a.new_route ?? a.route ?? {}
   const old = a.old_route
   const blocked = a.status === 'BLOCKED'
   const replanned = a.status === 'REPLANNED'
   const returning = a.status === 'RETURNING'
   const delay = a.delay_minutes
+  const requestId = a.request?.requestId
+  const canCheckIn = a.approval_status === 'APPROVED'
+    && !['COMPLETED', 'CANCELLED', 'SUPERSEDED', 'UNAVAILABLE', 'BLOCKED', 'RETURNING'].includes(a.status)
+  const needsPickup = a.mission_status === 'EN_ROUTE'
+  const needsDelivery = ['ABOARD', 'AT_SCENE'].includes(a.mission_status)
 
   const cls = ['ac', blocked ? 'blocked' : '', replanned || returning ? 'replanned' : '']
     .filter(Boolean).join(' ')
@@ -210,6 +228,33 @@ function AssignmentCard({ a, onSelect }) {
           {a.mission_status === 'ABOARD' && 'People aboard — en route to shelter'}
           {a.mission_status === 'AT_SCENE' && 'On scene with the caller'}
           {a.mission_status === 'DELIVERED' && 'Delivered — vehicle available again'}
+        </div>
+      )}
+      {canCheckIn && requestId && (needsPickup || needsDelivery) && (
+        <div className="ac-progress-actions">
+          {needsPickup ? (
+            <button
+              className="ghost-btn"
+              disabled={busy}
+              onClick={(event) => {
+                event.stopPropagation()
+                onReportProgress?.(requestId, 'picked_up')
+              }}
+            >
+              {busy ? 'Recording…' : 'Record pickup'}
+            </button>
+          ) : (
+            <button
+              className="btn-approve"
+              disabled={busy}
+              onClick={(event) => {
+                event.stopPropagation()
+                onReportProgress?.(requestId, 'delivered')
+              }}
+            >
+              {busy ? 'Recording…' : 'Mark delivered'}
+            </button>
+          )}
         </div>
       )}
       {/* The headline ETA is time to reach the caller. With a shelter leg the

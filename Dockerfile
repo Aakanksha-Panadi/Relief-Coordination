@@ -1,4 +1,12 @@
-# RescueIQ backend - Cloud Run container
+FROM node:20-alpine AS frontend-build
+
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# RescueIQ full-stack Cloud Run container
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -14,8 +22,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ ./
 # The orchestrator reads the road graph from ../data at runtime.
 COPY data/ /data/
+COPY --from=frontend-build /frontend/dist/ /app/frontend-dist/
 
 ENV ROAD_GRAPH_PATH=/data/road_graph.json \
+    FRONTEND_DIST=/app/frontend-dist \
     PORT=8080
 
 EXPOSE 8080

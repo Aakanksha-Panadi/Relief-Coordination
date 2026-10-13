@@ -147,6 +147,91 @@ class ResourceAgent:
                     by_id[rid].update(fields)
         return {"ok": True, "updates": updates}
 
+    def release_shelter_reservations(self, reservations: dict[str, int]) -> dict:
+        """Release undelivered shelter capacity without overwriting concurrent changes."""
+        reservations = {
+            resource_id: people
+            for resource_id, people in reservations.items()
+            if people > 0
+        }
+        if not reservations:
+            return {"ok": True, "updates": {}}
+
+        with self._reservation_lock:
+            if self.db is not None:
+                try:
+                    from google.cloud import firestore
+
+                    transaction = self.db.transaction()
+
+                    @firestore.transactional
+                    def release(txn):
+                        refs = {
+                            resource_id: self.db.collection("resources").document(resource_id)
+                            for resource_id in reservations
+                        }
+                        snapshots = {
+                            resource_id: next(iter(txn.get(ref)), None)
+                            for resource_id, ref in refs.items()
+                        }
+                        updates = {}
+                        for resource_id, snapshot in snapshots.items():
+                            data = snapshot.to_dict() if snapshot and snapshot.exists else None
+                            if not data:
+                                raise ValueError(f"Shelter {resource_id} no longer exists")
+                            occupied = resource_load(data)
+                            reserved = reservations[resource_id]
+                            if reserved > occupied:
+                                raise ValueError(
+                                    f"Shelter {resource_id} has {occupied} occupants, "
+                                    f"but {reserved} seats are marked reserved"
+                                )
+                            remaining = occupied - reserved
+                            capacity = resource_capacity(data)
+                            powered = data.get(
+                                "powerAvailable",
+                                data.get("power_available", True),
+                            ) is not False
+                            updates[resource_id] = {
+                                "currentOccupancy": remaining,
+                                "available": remaining < capacity and powered,
+                            }
+                        for resource_id, fields in updates.items():
+                            txn.update(refs[resource_id], fields)
+                        return updates
+
+                    updates = release(transaction)
+                    return {"ok": True, "updates": updates}
+                except Exception as exc:
+                    return {"ok": False, "reason": str(exc)}
+
+            by_id = {resource.get("resourceId"): resource for resource in self.mock_resources}
+            updates = {}
+            for resource_id, reserved in reservations.items():
+                shelter = by_id.get(resource_id)
+                if not shelter:
+                    return {"ok": False, "reason": f"Shelter {resource_id} no longer exists"}
+                occupied = resource_load(shelter)
+                if reserved > occupied:
+                    return {
+                        "ok": False,
+                        "reason": f"Shelter {resource_id} has {occupied} occupants, "
+                                  f"but {reserved} seats are marked reserved",
+                    }
+                remaining = occupied - reserved
+                capacity = resource_capacity(shelter)
+                powered = shelter.get(
+                    "powerAvailable",
+                    shelter.get("power_available", True),
+                ) is not False
+                updates[resource_id] = {
+                    "currentOccupancy": remaining,
+                    "available": remaining < capacity and powered,
+                }
+            for resource_id, fields in updates.items():
+                by_id[resource_id].update(fields)
+            return {"ok": True, "updates": updates}
+
     def get_all_resources(self) -> list:
         """Live fleet from Firestore, or the hardcoded fallback.
 
@@ -297,7 +382,8 @@ class ResourceAgent:
         try:
             docs = self.db.collection("requests").stream()
             return [self._to_request(doc) for doc in docs
-                    if (doc.to_dict() or {}).get("status") in ("PENDING", "ASSIGNED")]
+                    if (doc.to_dict() or {}).get("status")
+                    in ("PENDING", "ASSIGNED", "UNPROCESSED", "UNREACHABLE")]
         except Exception as e:
             print(f"Firestore active-request read failed: {e}")
             return []
@@ -421,6 +507,32 @@ class ResourceAgent:
             except Exception as e:
                 print(f"Save failed: {e}")
         return "mock_id"
+
+    def get_active_assignments(self) -> list:
+        """Read persisted assignments that have not been closed out."""
+        if not self.db:
+            return []
+        try:
+            active_statuses = {
+                "APPROVED", "PARTIAL", "REPLANNED", "UNCHANGED", "RETURNING", "BLOCKED"
+            }
+            return [
+                doc.to_dict()
+                for doc in self.db.collection("assignments").stream()
+                if (doc.to_dict() or {}).get("status") in active_statuses
+                and (doc.to_dict() or {}).get("mission_status") != "DELIVERED"
+            ]
+        except Exception as exc:
+            print(f"Active assignment read failed: {exc}")
+            return []
+
+    def update_assignment(self, assignment_id: str, updates: dict):
+        if not self.db or not assignment_id:
+            return
+        try:
+            self.db.collection("assignments").document(assignment_id).update(updates)
+        except Exception as exc:
+            print(f"Assignment update failed for {assignment_id}: {exc}")
 
     def save_event(self, event: dict) -> str:
         """Persist coordinator decisions/reminders as an append-only audit item."""

@@ -44,8 +44,10 @@ VITE_API_BASE=http://localhost:8080
 VITE_POLL_SECONDS=10
 ```
 
-For the deployed service use the Cloud Run HTTPS URL. `VITE_POLL_SECONDS=0`
-turns off background refresh.
+For local development, `VITE_API_BASE` defaults to `http://localhost:8080`.
+When deployed as a single Cloud Run service, the frontend calls the API on its
+own origin; no API URL needs to be configured. `VITE_POLL_SECONDS=0` turns off
+background refresh.
 
 ## Build for production
 
@@ -61,6 +63,7 @@ npm run preview   # serve the build locally to check it
 | Intake textarea → **Process request** | `POST /intake/process` |
 | **Load all 5** (multilingual demo set) | `POST /intake/batch` |
 | Request queue (sorted by urgency) | `GET /requests`, polled |
+| Review an uncertain request | Correct people count, urgency and verified location node, then `PATCH /requests/{request_id}/review` |
 | District map | `GET /graph` |
 | **Generate plan** | `POST /dispatch/plan` |
 | **Approve plan** | `POST /dispatch/approve` |

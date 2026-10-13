@@ -21,19 +21,18 @@ def _flag(name: str, default: str) -> bool:
 MOCK_MODE = _flag("MOCK_MODE", "false")
 
 GCP_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "resourceworkflow")
-VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "global")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 
 # Extraction is a determinism task: the same emergency message must always
 # yield the same urgency and people_count, or re-running a scenario silently
 # produces a different plan.
 GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0"))
 
-# gemini-2.5-flash thinks by default, which spent ~15s deliberating over
-# "explain this assignment in two sentences" and pushed /dispatch/plan past
-# 20 seconds. Extraction and narration are both shallow tasks here, so
-# thinking is off unless someone opts back in.
+# Gemini 2.5 can spend extra time deliberating, which is unnecessary for
+# extraction and short assignment explanations. Thinking is off unless enabled.
 GEMINI_THINKING_BUDGET = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
+GEMINI_THINKING_LEVEL = os.getenv("GEMINI_THINKING_LEVEL", "LOW").upper()
 
 # A Vertex call that never returns used to hang the endpoint forever, with
 # no bound and no error. Cap it; the agents all have a fallback path.
@@ -374,7 +373,11 @@ class _GeminiClient:
         removes the whole class of "parse whatever came back" failures.
         """
         gen_config: dict = {"temperature": GEMINI_TEMPERATURE}
-        if GEMINI_THINKING_BUDGET >= 0:
+        if GEMINI_MODEL.startswith("gemini-3"):
+            gen_config["thinking_config"] = {
+                "thinking_level": GEMINI_THINKING_LEVEL
+            }
+        elif GEMINI_THINKING_BUDGET >= 0:
             gen_config["thinking_config"] = {
                 "thinking_budget": GEMINI_THINKING_BUDGET
             }

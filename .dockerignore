@@ -3,6 +3,7 @@
 
 **/__pycache__/
 **/*.pyc
+**/node_modules/
 .venv/
 .venv*/
 venv/
@@ -14,6 +15,6 @@ venv/
 **/.env.*
 **/serviceAccountKey.json
 
-frontend/
+frontend/dist/
 backend/test_*.py
 **/*.md

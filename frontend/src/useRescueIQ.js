@@ -217,6 +217,18 @@ export function useRescueIQ() {
     [run, notify, loadRequests, loadSummary],
   )
 
+  const reviewRequest = useCallback(async (requestId, review) => {
+    const result = await run(
+      'reviewRequest',
+      () => api.reviewRequest(requestId, review),
+    )
+    if (result) {
+      notify(`${requestId} reviewed and added to the dispatch queue`, 'success')
+      await loadRequests()
+    }
+    return result
+  }, [run, notify, loadRequests])
+
   const generatePlan = useCallback(async (requestId) => {
     const result = await run('plan', () => api.createPlan(requestId))
     if (result) {
@@ -317,6 +329,27 @@ export function useRescueIQ() {
     [run, loadRequests, loadSummary],
   )
 
+  const reportProgress = useCallback(async (requestId, event) => {
+    const result = await run(`progress:${requestId}`, () =>
+      api.reportProgress(requestId, event),
+    )
+    if (!result) return null
+
+    notify(
+      event === 'picked_up'
+        ? 'Pickup check-in recorded'
+        : 'Delivery recorded; assigned resources are available again',
+      'success',
+    )
+    await Promise.all([loadRequests(), loadSummary()])
+    try {
+      setPlan(await api.currentPlan())
+    } catch (error) {
+      notify(`Check-in recorded, but the plan could not be refreshed: ${error.message}`, 'warn')
+    }
+    return result
+  }, [run, notify, loadRequests, loadSummary])
+
   const releaseAll = useCallback(async () => {
     const result = await run('release', () => api.releaseAllResources())
     if (result) {
@@ -359,6 +392,7 @@ export function useRescueIQ() {
     dismissToast,
     submitMessage,
     submitBatch,
+    reviewRequest,
     generatePlan,
     approvePlan,
     reviewPlan,
@@ -366,6 +400,7 @@ export function useRescueIQ() {
     approveReplan,
     reopenRoad,
     completeRequest,
+    reportProgress,
     releaseAll,
     resetAll,
     loadMetrics,

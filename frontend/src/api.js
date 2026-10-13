@@ -8,7 +8,8 @@
  */
 
 export const API_BASE =
-  import.meta.env.VITE_API_BASE?.replace(/\/$/, '') || 'http://localhost:8080'
+  import.meta.env.VITE_API_BASE?.replace(/\/$/, '') ??
+  (import.meta.env.DEV ? 'http://localhost:8080' : '')
 
 export class ApiError extends Error {
   constructor(message, { status, detail } = {}) {
@@ -79,6 +80,11 @@ export const api = {
 
   requests: () => request('/requests'),
   pendingRequests: () => request('/requests/pending'),
+  reviewRequest: (requestId, review) =>
+    request(`/requests/${encodeURIComponent(requestId)}/review`, {
+      method: 'PATCH',
+      body: review,
+    }),
 
   resources: () => request('/resources'),
   resourceSummary: () => request('/resources/summary'),

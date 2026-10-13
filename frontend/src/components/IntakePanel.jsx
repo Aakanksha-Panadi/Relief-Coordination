@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { formatRequestId } from '../formatters'
 
 /** Demo messages covering the languages the intake agent handles. */
 const SAMPLES = [
@@ -109,7 +110,9 @@ function ExtractionResult({ data }) {
   return (
     <div className="extract-card">
       <div className="extract-head">
-        <span>Extracted — {data.requestId}</span>
+        <span title={data.requestId}>
+          Extracted — {formatRequestId(data.requestId)}
+        </span>
         {typeof data.confidence === 'number' && (
           <span>{Math.round(data.confidence * 100)}% conf</span>
         )}

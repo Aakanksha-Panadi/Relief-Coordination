@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 
 from app.config import (
@@ -10,6 +11,8 @@ from app.config import (
     normalize_urgency,
     resolve_node_from_text,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class IntakeExtractionError(RuntimeError):
@@ -123,7 +126,10 @@ class IntakeAgent:
             count = None
         # Don't accept a model-invented number when no people count appears in
         # either the source or its translation.
-        count_pattern = r"\b\d+\s*(?:people|persons|person|of us|members|famil(?:y|ies)|passengers|ppl|log|lok|per)\b"
+        count_pattern = (
+            r"\b\d+\s*(?:people|persons|person|of us|members|famil(?:y|ies)|"
+            r"passengers|ppl|log|lok|per|लोग|व्यक्ति|व्यक्तियों|பேர்|மக்கள்)"
+        )
         count_evidence = re.search(count_pattern, raw_message if result.get("mock") else raw_message + " " + translated, re.I)
         if not count_evidence:
             count = None
@@ -137,7 +143,6 @@ class IntakeAgent:
             has_hindi = any("\u0900" <= char <= "\u097f" for char in raw_message)
             has_tamil = any("\u0b80" <= char <= "\u0bff" for char in raw_message)
             language = "hindi" if has_hindi else "tamil" if has_tamil else "unknown"
-            result["confidence"] = min(result.get("confidence", 0.0), 0.1)
             if language == "unknown":
                 flags.append("noisy_or_unsupported_text")
         if not any(name in language for name in ("english", "hindi", "tamil", "mixed", "hinglish")):
@@ -245,9 +250,22 @@ Emergency message:
             )
             text = (response.text or "").strip()
         except Exception as e:
-            # Network error, permission denied, or a safety filter leaving the
-            # candidate empty. Either way there is no extraction to return.
-            raise IntakeExtractionError(f"Gemini call failed: {e}") from e
+            # Keep provider diagnostics in server logs, not in the operator UI.
+            logger.warning("Gemini intake extraction failed: %s", e)
+            error_details = str(e).lower()
+            if (getattr(e, "status_code", None) == 429
+                    or "resource_exhausted" in error_details
+                    or "429" in error_details):
+                message = (
+                    "Gemini is temporarily rate-limited or at capacity. "
+                    "Retry later, or enter the request details manually."
+                )
+            else:
+                message = (
+                    "Gemini extraction is temporarily unavailable. "
+                    "Retry later, or enter the request details manually."
+                )
+            raise IntakeExtractionError(message) from e
 
         if not text:
             raise IntakeExtractionError(

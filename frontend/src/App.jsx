@@ -15,6 +15,17 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(null)
   const rq = useRescueIQ()
 
+  const approvePlan = async () => {
+    const result = await rq.approvePlan()
+    if (result && !result.replanned) {
+      const approvedIds = new Set(
+        (result.assignments ?? []).map((assignment) => assignment.requestId),
+      )
+      if (approvedIds.has(selectedId)) setSelectedId(null)
+    }
+    return result
+  }
+
   return (
     <div className="app">
       <TopBar
@@ -50,8 +61,11 @@ export default function App() {
               />
               <RequestQueue
                 requests={rq.requests}
+                graph={rq.graph}
                 selectedId={selectedId}
                 onSelect={setSelectedId}
+                onReview={rq.reviewRequest}
+                reviewBusy={rq.busy.reviewRequest}
               />
             </div>
 
@@ -71,11 +85,11 @@ export default function App() {
                 replan={rq.replan}
                 busy={rq.busy}
                 onGenerate={rq.generatePlan}
-                selectedRequestId={selectedId}
-                onApprove={rq.approvePlan}
+                onApprove={approvePlan}
                 onReject={rq.reviewPlan}
                 onApproveReplan={rq.approveReplan}
                 onSelectRequest={setSelectedId}
+                onReportProgress={rq.reportProgress}
               />
               <ReplanBar
                 graph={rq.graph}

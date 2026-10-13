@@ -24,6 +24,12 @@ class ResourceAgent:
         self.source = "unknown"
         self._reservation_lock = threading.RLock()
         self._mock_approved_plans = {}
+        # requestId -> the Firestore document id that actually holds it.
+        # Documents written before ids were keyed on requestId carry an
+        # auto-id, so `document(requestId)` addresses nothing and every
+        # update/delete against them silently no-ops. Remember the real id
+        # whenever we read one.
+        self._request_doc_ids = {}
 
     def save_approved_plan(self, plan: dict):
         """Persist a plan-level approval summary for the coordinator history."""
@@ -221,10 +227,49 @@ class ResourceAgent:
             if not doc_id:
                 continue
             try:
-                self.db.collection(collection).document(doc_id).delete()
+                ref = self.db.collection(collection).document(doc_id)
+                # Deleting a document that does not exist succeeds in
+                # Firestore, so counting attempts reported removals that
+                # never happened. Only count what was actually there.
+                if not ref.get().exists:
+                    continue
+                ref.delete()
                 removed += 1
             except Exception as e:
                 print(f"Delete failed for {collection}/{doc_id}: {e}")
+        return removed
+
+    def delete_all_requests(self) -> int:
+        """Clear the requests collection for a demo reset.
+
+        Deleting by requestId missed every document stored under an auto-id,
+        and missed statuses such as REVIEW_REQUIRED that never enter the
+        in-memory queue, so a 'reset' console still showed old cases.
+        """
+        if not self.db:
+            return 0
+        removed = 0
+        try:
+            for doc in self.db.collection("requests").stream():
+                doc.reference.delete()
+                removed += 1
+        except Exception as e:
+            print(f"Request collection clear failed: {e}")
+        self._request_doc_ids.clear()
+        return removed
+
+    def delete_approved_plans(self) -> int:
+        """Drop the approval history so a reset console starts empty."""
+        self._mock_approved_plans.clear()
+        if not self.db:
+            return 0
+        removed = 0
+        try:
+            for doc in self.db.collection("approved_plans").stream():
+                doc.reference.delete()
+                removed += 1
+        except Exception as e:
+            print(f"Approved plan history clear failed: {e}")
         return removed
 
     def get_pending_requests(self) -> list:
@@ -257,17 +302,66 @@ class ResourceAgent:
             print(f"Firestore active-request read failed: {e}")
             return []
 
-    @staticmethod
-    def _to_request(doc) -> dict:
+    def _to_request(self, doc) -> dict:
         """Normalize a document and guarantee it has an id.
 
         Documents written before ids were keyed on requestId carry an opaque
         auto-id and no requestId field; the document id is their identity.
+        Either way, record where the document actually lives so later writes
+        address the real thing instead of a document id that was never used.
         """
         data = normalize_request(doc.to_dict() or {})
         if not data.get("requestId"):
             data["requestId"] = doc.id
+        self._request_doc_ids[data["requestId"]] = doc.id
         return data
+
+    def _request_doc_id(self, request_id: str) -> str | None:
+        """Resolve a requestId to the document id that holds it.
+
+        Falls back to a field query because the mapping is only populated by
+        reads, and a write can arrive for a request this process never read.
+        """
+        known = self._request_doc_ids.get(request_id)
+        if known:
+            return known
+        try:
+            if self.db.collection("requests").document(request_id).get().exists:
+                self._request_doc_ids[request_id] = request_id
+                return request_id
+            matches = list(
+                self.db.collection("requests")
+                .where(filter=FieldFilter("requestId", "==", request_id))
+                .stream()
+            )
+            if matches:
+                # Historic data contains the same requestId on more than one
+                # document. Touch them all rather than guessing which is live.
+                for match in matches:
+                    self._request_doc_ids[request_id] = match.id
+                return matches[0].id
+        except Exception as e:
+            print(f"Could not resolve document for {request_id}: {e}")
+        return None
+
+    def _request_doc_ids_for(self, request_id: str) -> list:
+        """Every document id carrying this requestId, duplicates included."""
+        if not self.db or not request_id:
+            return []
+        ids = []
+        try:
+            if self.db.collection("requests").document(request_id).get().exists:
+                ids.append(request_id)
+            ids.extend(
+                doc.id
+                for doc in self.db.collection("requests")
+                .where(filter=FieldFilter("requestId", "==", request_id))
+                .stream()
+                if doc.id != request_id
+            )
+        except Exception as e:
+            print(f"Could not enumerate documents for {request_id}: {e}")
+        return ids
 
     def save_request(self, request_data: dict) -> str:
         """Persist a request. Raises PersistenceError if the write is lost.
@@ -287,6 +381,10 @@ class ResourceAgent:
                 else self.db.collection("requests").document()
             )
             doc_ref.set(request_data)
+            if doc_id:
+                self._request_doc_ids[doc_id] = doc_ref.id
+            elif request_data.get("requestId"):
+                self._request_doc_ids[request_data["requestId"]] = doc_ref.id
             return doc_ref.id
         except Exception as e:
             raise PersistenceError(f"Could not save request: {e}") from e
@@ -300,8 +398,12 @@ class ResourceAgent:
         """
         if not self.db or not request_id:
             return
+        doc_id = self._request_doc_id(request_id)
+        if not doc_id:
+            print(f"Firestore request update skipped: no document for {request_id}")
+            return
         try:
-            self.db.collection("requests").document(request_id).update(updates)
+            self.db.collection("requests").document(doc_id).update(updates)
         except Exception as e:
             print(f"Firestore request update failed for {request_id}: {e}")
 

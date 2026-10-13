@@ -202,6 +202,25 @@ function AssignmentCard({ a, onSelect }) {
       {returning && <div className="ac-change">Returning to safety · ETA {a.return_eta_minutes ?? route.minutes} min</div>}
       {a.wave && <div className="ac-change">Wave {a.wave} of {a.wave_count} · {a.wave_people} people · scheduled ETA {route.minutes} min</div>}
       {a.shelter && <div className="ac-route">Destination shelter: {a.shelter.name}</div>}
+      {/* Where the mission actually is. Approval dispatches the vehicle;
+          it is not finished until someone reports the drop-off. */}
+      {a.mission_status && (
+        <div className="ac-change">
+          {a.mission_status === 'EN_ROUTE' && 'En route to caller — awaiting pickup check-in'}
+          {a.mission_status === 'ABOARD' && 'People aboard — en route to shelter'}
+          {a.mission_status === 'AT_SCENE' && 'On scene with the caller'}
+          {a.mission_status === 'DELIVERED' && 'Delivered — vehicle available again'}
+        </div>
+      )}
+      {/* The headline ETA is time to reach the caller. With a shelter leg the
+          people are not safe until that is driven too, so show both. */}
+      {a.shelter && typeof a.total_eta_minutes === 'number' &&
+        a.total_eta_minutes !== route.minutes && (
+        <div className="ac-route">
+          {route.minutes} min to reach them · {a.total_eta_minutes} min to safety
+          {typeof a.shelter_eta_minutes === 'number' && ` (+${a.shelter_eta_minutes} min to shelter)`}
+        </div>
+      )}
 
       {a.explanation && (
         <div className={`why-box ${blocked ? 'why-red' : replanned ? 'why-amber' : 'why-green'}`}>

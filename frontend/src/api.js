@@ -97,10 +97,17 @@ export const api = {
       body: { approved_by: approvedBy },
     }),
   reviewPlan: (review) => request('/dispatch/review', { method: 'POST', body: review }),
-  completeRequest: (requestId) =>
+  completeRequest: (requestId, reportedBy = 'coordinator') =>
     request('/dispatch/complete', {
       method: 'POST',
-      body: { request_id: requestId },
+      body: { request_id: requestId, reported_by: reportedBy },
+    }),
+  // Nothing observes an arrival; a reporter logs it. `picked_up` means the
+  // people are aboard, `delivered` means they are at the shelter.
+  reportProgress: (requestId, event, reportedBy = 'coordinator') =>
+    request('/dispatch/progress', {
+      method: 'POST',
+      body: { request_id: requestId, event, reported_by: reportedBy },
     }),
 
   closeRoad: (edgeId) =>

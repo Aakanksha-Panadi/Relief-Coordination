@@ -78,6 +78,17 @@ The agents talk to Gemini through `config.gemini_model()`, which wraps the
 Gen AI SDK in the `generate_content(prompt).text` shape the agents expect.
 Changing SDK or model is a one-file change.
 
+### Latency knobs
+
+| Variable | Default | Why |
+|---|---|---|
+| `GEMINI_THINKING_BUDGET` | `0` | `gemini-2.5-flash` deliberates by default, which cost ~15s per narration call and pushed a dispatch plan past 20 seconds. Extraction and narration are both shallow here; measured output is identical with thinking off. Set `-1` to restore the model default. |
+| `GEMINI_TIMEOUT_SECONDS` | `30` | Caps a Vertex call that would otherwise hang an endpoint with no bound. Every agent has a fallback path. |
+| `REPLAN_DEBOUNCE_SECONDS` | `3` | Seconds of quiet before batched road changes trigger one replan. Low for demos; a real control room would want it higher. |
+
+Assignment explanations are generated concurrently, so planning the whole
+queue costs roughly one Gemini round trip rather than one per assignment.
+
 ---
 
 ## API
@@ -95,10 +106,10 @@ Base URL `http://localhost:8080`. Full schema at `/docs`.
 | GET | `/resources` | Resource list, filterable by `type` / `available_only` |
 | GET | `/resources/summary` | Totals and availability per type (dashboard tiles) |
 | POST | `/resources/release-all` | Force every resource back to available (recovery) |
-| POST | `/dispatch/plan` | Build the assignment plan with explanations |
+| POST | `/dispatch/plan` | Plan the whole pending queue in triage order, with explanations |
 | GET | `/dispatch/current` | The plan currently awaiting approval |
 | POST | `/dispatch/approve` | Commit the plan, mark resources busy |
-| POST | `/replan/road-closure` | Close an edge, recompute affected routes |
+| POST | `/replan/road-closure` | Close an edge; one replan fires after the network goes quiet |
 | POST | `/replan/approve` | Accept the replanned routes |
 | POST | `/replan/reopen` | Reopen a closed edge |
 | GET | `/metrics` | RescueIQ vs first-come-first-served baseline |
@@ -182,6 +193,11 @@ a high urgency bonus.
 `GET /metrics` compares the current plan against a first-come-first-served
 baseline — requests served in arrival order by whichever resource is reachable
 first, which is what an overloaded control room actually does.
+
+The baseline is fed the queue sorted by `createdAt`, never the triage-ranked
+list. Handing it the ranked list let it inherit RescueIQ's ordering, so both
+plans scored the same `critical_first_pct` and the headline improvement always
+read zero.
 
 Both plans are computed over the same road graph and the same resources, so
 the comparison is real rather than asserted. The headline number is
@@ -279,5 +295,5 @@ Requires `backend/serviceAccountKey.json` (git-ignored, never commit it).
 | Evaluation harness | Done |
 | Firestore schema + seed | Done |
 | Container + deploy config | Done, not yet deployed |
-| Frontend | React console built (`frontend/`); needs `npm install` — Node not yet installed |
-| Gemini live mode | Code paths written, needs a network that allows Vertex AI |
+| Frontend | React console built (`frontend/`); run with `npm install && npm run dev` |
+| Gemini live mode | Verified end to end against Vertex AI; `test_api.py` passes with `MOCK_MODE=false` |

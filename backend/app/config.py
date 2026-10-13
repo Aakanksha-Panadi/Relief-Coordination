@@ -29,7 +29,32 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 # produces a different plan.
 GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0"))
 
+# gemini-2.5-flash thinks by default, which spent ~15s deliberating over
+# "explain this assignment in two sentences" and pushed /dispatch/plan past
+# 20 seconds. Extraction and narration are both shallow tasks here, so
+# thinking is off unless someone opts back in.
+GEMINI_THINKING_BUDGET = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
+
+# A Vertex call that never returns used to hang the endpoint forever, with
+# no bound and no error. Cap it; the agents all have a fallback path.
+GEMINI_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "30"))
+
 FIRESTORE_DATABASE = os.getenv("FIRESTORE_DATABASE", "rescource-graph")
+
+# Seconds of quiet before a batch of road changes triggers one replan.
+# Demos need this short; a real control room would want it longer.
+REPLAN_DEBOUNCE_SECONDS = float(os.getenv("REPLAN_DEBOUNCE_SECONDS", "3"))
+
+# Nothing can detect that a boat arrived; someone has to report it. Normally
+# that is a coordinator logging a radio check-in. With DEMO_CLOCK on, a timer
+# reports those check-ins instead so a demo screen moves on its own.
+#
+# The clock only ever reports progress on an already-approved assignment. It
+# cannot approve anything, and every event it files is marked simulated.
+DEMO_CLOCK = _flag("DEMO_CLOCK", "false")
+DEMO_CLOCK_SECONDS_PER_MINUTE = float(
+    os.getenv("DEMO_CLOCK_SECONDS_PER_MINUTE", "1")
+)
 
 PORT = int(os.getenv("PORT", "8080"))
 CORS_ORIGINS = [
@@ -262,13 +287,16 @@ def resolve_node_from_text(text: str) -> str | None:
         return None
 
     candidates = {}
+    overlaps = {}
 
     def add_candidate(label, node_id):
         label_tokens = set(re.findall(r"[a-z0-9]+", re.sub(r"\brd\b", "road", label.lower().replace("_", " "))))
         label_tokens -= {"at", "in", "near", "the", "of", "area", "location", "around", "to"}
         if not label_tokens:
             return
-        coverage = len(tokens.intersection(label_tokens)) / len(tokens)
+        shared = tokens.intersection(label_tokens)
+        overlaps[node_id] = max(overlaps.get(node_id, 0), len(shared))
+        coverage = len(shared) / len(tokens)
         if coverage >= 0.8:
             candidates[node_id] = max(candidates.get(node_id, 0), coverage)
 
@@ -281,7 +309,22 @@ def resolve_node_from_text(text: str) -> str | None:
         best_score = max(candidates.values())
         best_nodes = [node_id for node_id, score in candidates.items() if score == best_score]
         # A tie is an explicit ambiguity. Do not fall back to a weaker alias.
-        return best_nodes[0] if len(best_nodes) == 1 else None
+        if len(best_nodes) == 1:
+            return best_nodes[0]
+        return None
+
+    # Nothing covered the caller's wording closely enough. Callers say
+    # where they are, not what the node is called: "City Bank Market Road"
+    # spends half its words on a landmark the graph never heard of, so
+    # query coverage is 0.5 and the request went unlocated entirely.
+    # Fall back to the node sharing the most distinctive words, provided
+    # there are at least two and exactly one node shares that many.
+    if overlaps:
+        best_overlap = max(overlaps.values())
+        if best_overlap >= 2:
+            closest = [n for n, count in overlaps.items() if count == best_overlap]
+            if len(closest) == 1:
+                return closest[0]
 
     matches = {node for pattern, node in _TEXT_TO_NODE
                if not pattern.startswith("ward") and pattern in lowered}
@@ -331,6 +374,10 @@ class _GeminiClient:
         removes the whole class of "parse whatever came back" failures.
         """
         gen_config: dict = {"temperature": GEMINI_TEMPERATURE}
+        if GEMINI_THINKING_BUDGET >= 0:
+            gen_config["thinking_config"] = {
+                "thinking_budget": GEMINI_THINKING_BUDGET
+            }
         if schema is not None:
             gen_config["response_mime_type"] = "application/json"
             gen_config["response_schema"] = schema
@@ -355,6 +402,10 @@ def gemini_model():
         ) from e
 
     client = genai.Client(
-        vertexai=True, project=GCP_PROJECT, location=VERTEX_LOCATION
+        vertexai=True,
+        project=GCP_PROJECT,
+        location=VERTEX_LOCATION,
+        # google-genai takes the HTTP timeout in milliseconds.
+        http_options={"timeout": int(GEMINI_TIMEOUT_SECONDS * 1000)},
     )
     return _GeminiClient(client, GEMINI_MODEL)

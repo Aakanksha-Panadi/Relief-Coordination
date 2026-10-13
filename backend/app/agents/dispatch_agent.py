@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from app.config import (
     DISPATCHABLE_TYPES,
     MOCK_MODE,
@@ -149,14 +151,22 @@ class DispatchAgent:
                         unassigned.append(req)
                         continue
                     shelter_occupancy[shelter.get("resourceId")] = planned_occupancy
-                explanation = self._explain_assignment(
-                    best["resource"], req, best["route"]
-                )
+                # Filled in parallel once the plan is complete; one serial
+                # Gemini call per assignment made a full-queue plan scale
+                # linearly in wall-clock time.
                 assignments.append({
                     "request": req,
                     "resource": best["resource"],
                     "shelter": shelter,
                     "shelter_route": shelter_route if shelter else None,
+                    # route.minutes is time to reach the caller. When there is
+                    # a shelter leg the people are not safe until it is also
+                    # driven, so both are reported rather than just the first.
+                    "shelter_eta_minutes": (shelter_route or {}).get("minutes") if shelter else None,
+                    "total_eta_minutes": (
+                        best["route"].get("minutes", 0) + (shelter_route or {}).get("minutes", 0)
+                        if shelter else best["route"].get("minutes")
+                    ),
                     "route": best["route"],
                     "score": best["score"],
                     # Always empty by construction: invalid candidates are
@@ -164,7 +174,7 @@ class DispatchAgent:
                     # comparison reports a measured value, not a missing key.
                     "violations": [],
                     "warnings": best["warnings"],
-                    "explanation": explanation,
+                    "explanation": None,
                     "status": "PENDING_APPROVAL"
                 })
                 assignment = assignments[-1]
@@ -231,7 +241,16 @@ class DispatchAgent:
                             round_trip = 2 * eta
                             wave_route = dict(route)
                             wave_route["minutes"] = eta + (trip - 1) * round_trip
+                            shelter_leg = None
+                            if shelter:
+                                shelter_leg = next(
+                                    (rt.get("minutes") for rt, sh in shelter_routes
+                                     if sh.get("resourceId") == shelter.get("resourceId")),
+                                    None,
+                                )
                             assignments.append({"request": req, "resource": resource, "route": wave_route,
+                                                "shelter_eta_minutes": shelter_leg,
+                                                "total_eta_minutes": wave_route["minutes"] + (shelter_leg or 0),
                                                 "shelter": shelter, "wave": wave, "wave_count": None,
                                                 "wave_people": people, "status": "PENDING_APPROVAL",
                                                 "score": 0, "violations": [], "warnings": [],
@@ -254,6 +273,7 @@ class DispatchAgent:
                     )
                 unassigned.append(req)
 
+        self._fill_explanations(assignments)
         tradeoff = self._explain_tradeoff(assignments)
 
         return {
@@ -264,6 +284,42 @@ class DispatchAgent:
             "total_unassigned": len(unassigned),
             "alerts": coverage_alerts,
         }
+
+    def _fill_explanations(self, assignments: list):
+        """Narrate every assignment that still needs it, concurrently.
+
+        Explanations are independent of one another and of the decisions
+        already made, so they fan out. Failures inside the worker are already
+        handled by _explain_assignment's fallback.
+        """
+        pending = [a for a in assignments if a.get("explanation") is None]
+        if not pending:
+            return
+        if MOCK_MODE or self.model is None or len(pending) == 1:
+            for assignment in pending:
+                assignment["explanation"] = self._explain_assignment(
+                    assignment["resource"], assignment["request"], assignment["route"]
+                )
+            return
+        with ThreadPoolExecutor(max_workers=min(8, len(pending))) as pool:
+            futures = {
+                pool.submit(
+                    self._explain_assignment,
+                    assignment["resource"],
+                    assignment["request"],
+                    assignment["route"],
+                ): assignment
+                for assignment in pending
+            }
+            for future in as_completed(futures):
+                assignment = futures[future]
+                try:
+                    assignment["explanation"] = future.result()
+                except Exception as e:
+                    print(f"Explanation generation failed: {e}")
+                    assignment["explanation"] = self._fallback_explanation(
+                        assignment["resource"], assignment["request"], assignment["route"]
+                    )
 
     def _explain_assignment(self, resource: dict, request: dict, route: dict) -> str:
         if MOCK_MODE:

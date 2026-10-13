@@ -96,6 +96,13 @@ class PlanReviewRequest(BaseModel):
 
 class CompleteRequest(BaseModel):
     request_id: str = Field(..., min_length=1, description="Request that has been served")
+    reported_by: str = Field(default="coordinator", description="Who called the arrival in")
+
+
+class ProgressRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, description="Request the check-in is about")
+    event: str = Field(..., description="picked_up or delivered")
+    reported_by: str = Field(default="coordinator", description="Crew, coordinator or feed that reported it")
 
 
 # ---------- health & meta ----------
@@ -113,6 +120,8 @@ def health():
         # the 16 seeded ones — different capacities and positions entirely.
         "resource_source": orch.resource_agent.source,
         "resource_count": len(orch.resources),
+        # Reported so nobody mistakes simulated check-ins for real tracking.
+        "demo_clock": config.DEMO_CLOCK,
     }
 
 
@@ -200,7 +209,7 @@ def resource_unavailable(resource_id: str, payload: ResourceUnavailableRequest):
 
 @app.post("/dispatch/plan", tags=["dispatch"])
 def dispatch_plan(request_id: str | None = None):
-    """Plan one selected request, or the highest-priority pending request."""
+    """Plan one selected request, or the whole pending queue in triage order."""
     return unwrap(get_orchestrator().generate_dispatch_plan(request_id=request_id))
 
 
@@ -241,9 +250,25 @@ def dispatch_review(payload: PlanReviewRequest):
 def dispatch_complete(payload: CompleteRequest):
     """Rescue finished: free the resource and move it to where it went.
 
-    The only route back from busy other than a full reset.
+    Shorthand for a `delivered` check-in.
     """
-    return unwrap(get_orchestrator().complete_assignment(payload.request_id))
+    return unwrap(get_orchestrator().complete_assignment(
+        payload.request_id, reported_by=payload.reported_by
+    ))
+
+
+@app.post("/dispatch/progress", tags=["dispatch"])
+def dispatch_progress(payload: ProgressRequest):
+    """Log a check-in against a travelling assignment.
+
+    `picked_up` means the crew has the people aboard; `delivered` means they
+    are at the shelter and the vehicle is free. Nothing can observe either, so
+    both arrive from a reporter: a coordinator logging a radio call, a crew
+    app, or a position feed.
+    """
+    return unwrap(get_orchestrator().report_progress(
+        payload.request_id, payload.event, reported_by=payload.reported_by
+    ))
 
 
 # ---------- replanning ----------

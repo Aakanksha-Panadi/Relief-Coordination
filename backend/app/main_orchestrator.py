@@ -51,9 +51,12 @@ class RescueIQOrchestrator:
         self._intake_lock = threading.RLock()
         self._closure_lock = threading.RLock()
         self._closure_changes = set()
+        # Pending demo-clock check-ins, cancelled on reset so a finished
+        # run cannot file arrivals against the next one.
+        self._mission_timers = []
         self._closure_timer = None
         self._closure_deadline = None
-        self._closure_debounce_seconds = 60
+        self._closure_debounce_seconds = config.REPLAN_DEBOUNCE_SECONDS
         self._plan_reminders = {}
         self._session_assignment_ids = set()
         self._session_assigned_request_ids = set()
@@ -386,21 +389,34 @@ class RescueIQOrchestrator:
         if not pending:
             return {"error": "All requests are already assigned"}
 
-        # Each approval covers a single request. Rank the queue with the same
-        # urgency, vulnerability, group-size, ETA, and ID rules as dispatch.
+        # A named request is planned alone; otherwise the plan covers the
+        # whole pending queue, ranked by the same urgency, vulnerability,
+        # group-size, ETA and ID rules as dispatch. Planning one request at a
+        # time made /metrics compare a single-request plan, where triage
+        # cannot show up at all and critical_first_pct always read zero.
         if request_id:
             selected = next((r for r in pending if r.get("requestId") == request_id), None)
             if selected is None:
                 return {"error": f"Request '{request_id}' is not pending and cannot be planned."}
             pending = [selected]
         else:
-            pending = self.dispatch.prioritize_requests(pending)[:1]
+            pending = self.dispatch.prioritize_requests(pending)
+
+        # First-come-first-served means arrival order, so the baseline gets
+        # the queue sorted by when each call came in. Handing it the
+        # already-prioritized list let the baseline inherit RescueIQ's triage,
+        # which is why critical_first_pct came out identical for both and the
+        # headline improvement always read zero.
+        arrival_order = sorted(
+            pending,
+            key=lambda r: (r.get("createdAt") or "", r.get("requestId") or ""),
+        )
 
         # Baseline is scored against the same fleet the real plan sees.
         # Computing it later, after /dispatch/approve has marked resources
         # busy, handed the baseline a depleted fleet and understated it.
         baseline = self.evaluator.score_plan(
-            self.evaluator.baseline_plan(pending), len(pending)
+            self.evaluator.baseline_plan(arrival_order), len(pending)
         )
 
         self.current_plan = self.dispatch.create_plan(pending)
@@ -413,7 +429,7 @@ class RescueIQOrchestrator:
             self.current_plan, len(pending)
         )
         self.current_plan["baseline_metrics"] = baseline
-        self.current_plan["request_count"] = 1
+        self.current_plan["request_count"] = len(pending)
         self.current_plan["total_approved_assignments"] = len(self._session_assignment_ids)
         for request in self.current_plan.get("unassigned", []):
             if request.get("status") == "UNREACHABLE":
@@ -623,6 +639,8 @@ class RescueIQOrchestrator:
                 "wave_count": assignment.get("wave_count"),
                 "status": "APPROVED",
                 "eta_minutes": route.get("minutes"),
+                "shelter_eta_minutes": assignment.get("shelter_eta_minutes"),
+                "total_eta_minutes": assignment.get("total_eta_minutes"),
                 "route": route.get("path", []),
                 "explanation": assignment.get("explanation", ""),
                 "approvedBy": approved_by,
@@ -654,6 +672,12 @@ class RescueIQOrchestrator:
             assignment["approval_status"] = "APPROVED"
             if assignment.get("status") != "PARTIAL":
                 assignment["status"] = "APPROVED"
+            # Approval dispatches the vehicle; it is now travelling, not done.
+            # Without a state here an assignment jumped straight from APPROVED
+            # to COMPLETED, so nothing could tell a boat that had just left
+            # from one about to arrive, and a replan could not know whether
+            # the people were already aboard.
+            assignment["mission_status"] = "EN_ROUTE"
             approved.append(record)
 
         self.current_plan["approval_status"] = "APPROVED"
@@ -674,6 +698,7 @@ class RescueIQOrchestrator:
             "assignments": approved,
         }
         self.resource_agent.save_approved_plan(approved_plan)
+        self._schedule_simulated_checkins()
         self._approved_plans = [p for p in self._approved_plans if p.get("planId") != approved_plan["planId"]]
         self._approved_plans.append(approved_plan)
         self._approved_plans.sort(key=lambda p: p.get("approvedAt", ""), reverse=True)
@@ -710,7 +735,113 @@ class RescueIQOrchestrator:
                     r["destinationNode"] = (route.get("path") or [None])[-1]
                 break
 
-    def complete_assignment(self, request_id: str) -> dict:
+    # ---------- mission progress ----------
+
+    def report_progress(self, request_id: str, event: str,
+                        reported_by: str = "coordinator",
+                        simulated: bool = False) -> dict:
+        """Log a check-in against a travelling assignment.
+
+        Nothing can observe that a boat arrived, so arrival is always
+        something a reporter tells us: a coordinator logging a radio call, a
+        crew app, or a position feed. They all land here.
+        """
+        if event not in ("picked_up", "delivered"):
+            return {"error": "event must be 'picked_up' or 'delivered'"}
+        if event == "delivered":
+            return self.complete_assignment(
+                request_id, reported_by=reported_by, simulated=simulated
+            )
+
+        with self._approval_lock:
+            matches = [a for a in (self.current_plan or {}).get("assignments", [])
+                       if a.get("request", {}).get("requestId") == request_id]
+            if not matches:
+                return {"error": f"No assignment found for request '{request_id}'"}
+            if any(a.get("approval_status") != "APPROVED" for a in matches):
+                return {"error": f"{request_id} has not been approved yet"}
+            if all(a.get("mission_status") in ("ABOARD", "DELIVERED") for a in matches):
+                return {"error": f"{request_id} is already reported picked up"}
+
+            now = datetime.now(timezone.utc).isoformat()
+            aboard = []
+            for match in matches:
+                if match.get("mission_status") == "DELIVERED":
+                    continue
+                route = match.get("route", {})
+                at_node = (route.get("path") or [None])[-1]
+                # Reaching the caller is only half the job when a shelter is
+                # involved; the vehicle is now carrying people, which is what
+                # makes a later closure on the drop-off leg urgent.
+                match["mission_status"] = "ABOARD" if match.get("shelter") else "AT_SCENE"
+                match["picked_up_at"] = now
+                resource = match["resource"]
+                resource["currentNode"] = at_node
+                self.resource_agent.update_resource(
+                    resource["resourceId"], {"currentNode": at_node}
+                )
+                aboard.append(resource["resourceId"])
+
+            self._audit({"type": "mission_checkin", "event": "picked_up",
+                         "requestId": request_id, "resourceIds": aboard,
+                         "reportedBy": reported_by, "simulated": simulated,
+                         "timestamp": now})
+            return {"requestId": request_id, "event": "picked_up",
+                    "mission_status": matches[0].get("mission_status"),
+                    "resourceIds": aboard, "reportedBy": reported_by,
+                    "simulated": simulated, "at": now}
+
+    def _schedule_simulated_checkins(self):
+        """Have a timer file the check-ins a crew would radio in.
+
+        Only runs with DEMO_CLOCK on. It reports progress on assignments the
+        coordinator has already approved and never approves anything itself,
+        so the human-in-the-loop guarantee is unchanged.
+        """
+        if not config.DEMO_CLOCK or not self.current_plan:
+            return
+        rate = max(0.0, config.DEMO_CLOCK_SECONDS_PER_MINUTE)
+        for assignment in self.current_plan.get("assignments", []):
+            if assignment.get("approval_status") != "APPROVED":
+                continue
+            if assignment.get("mission_status") != "EN_ROUTE":
+                continue
+            request_id = assignment.get("request", {}).get("requestId")
+            if not request_id:
+                continue
+            pickup = (assignment.get("route") or {}).get("minutes") or 0
+            total = assignment.get("total_eta_minutes")
+            if total is None:
+                total = pickup
+            for delay_minutes, event in ((pickup, "picked_up"), (total, "delivered")):
+                timer = threading.Timer(
+                    max(0.1, delay_minutes * rate),
+                    self._simulated_checkin,
+                    args=(request_id, event),
+                )
+                timer.daemon = True
+                timer.start()
+                self._mission_timers.append(timer)
+
+    def _simulated_checkin(self, request_id: str, event: str):
+        try:
+            self.report_progress(
+                request_id, event,
+                reported_by="demo-clock (simulated)", simulated=True,
+            )
+        except Exception as exc:
+            self.events.append({"type": "simulated_checkin_failed",
+                                "requestId": request_id, "event": event,
+                                "error": str(exc),
+                                "timestamp": datetime.now(timezone.utc).isoformat()})
+
+    def _cancel_simulated_checkins(self):
+        for timer in self._mission_timers:
+            timer.cancel()
+        self._mission_timers = []
+
+    def complete_assignment(self, request_id: str, reported_by: str = "coordinator",
+                            simulated: bool = False) -> dict:
         """Mark a rescue finished: free the resource and move it to where it went.
 
         Without this there was no way back from busy except /reset, so a
@@ -733,24 +864,43 @@ class RescueIQOrchestrator:
         for match in matches:
             resource = match["resource"]
             route = match.get("route", {})
-            arrived_at = (route.get("path") or [None])[-1]
-            updates = {"available": True, "currentLoad": 0, "assignedTo": None, "currentNode": arrived_at}
+            # An evacuation ends at the shelter, not at the doorstep where the
+            # people were picked up. Recording the pickup node left the vehicle
+            # parked where it collected them while the people it carried were
+            # already counted into a shelter a reroute away, so the next
+            # assignment was planned from a place the vehicle had left.
+            shelter_route = match.get("shelter_route") or {}
+            arrived_at = (
+                (shelter_route.get("path") or [None])[-1]
+                if match.get("shelter") and shelter_route.get("path")
+                else (route.get("path") or [None])[-1]
+            )
+            updates = {"available": True, "currentLoad": 0, "assignedTo": None,
+                       "currentNode": arrived_at, "destinationNode": None}
             self.resource_agent.update_resource(resource["resourceId"], updates)
             for local in self.resources:
                 if local.get("resourceId") == resource["resourceId"]:
                     local.update(updates)
                     break
             match["status"] = "COMPLETED"
+            match["mission_status"] = "DELIVERED"
+            match["delivered_at"] = now
             released.append({"resourceId": resource["resourceId"], "currentNode": arrived_at})
         matches[0]["request"]["status"] = "COMPLETED"
         self.resource_agent.update_request(
             request_id, {"status": "COMPLETED", "completedAt": now}
         )
-        self.events.append(
-            {"type": "assignment_completed", "requestId": request_id, "timestamp": now}
+        self._audit(
+            {"type": "mission_checkin", "event": "delivered",
+             "requestId": request_id, "reportedBy": reported_by,
+             "simulated": simulated, "timestamp": now}
         )
         return {
             "requestId": request_id,
+            "event": "delivered",
+            "mission_status": "DELIVERED",
+            "reportedBy": reported_by,
+            "simulated": simulated,
             "resourceId": released[0]["resourceId"],
             "released_resources": released,
             "released": True,
@@ -768,10 +918,17 @@ class RescueIQOrchestrator:
                 "available": False, "status": "UNAVAILABLE", "unavailable_reason": reason,
                 "currentLoad": 0, "assignedTo": None,
             })
+            is_shelter = resource.get("type") == "shelter"
             affected = []
             prior_assignments = (self.current_plan or {}).get("assignments", [])
             for assignment in prior_assignments:
-                if assignment.get("resource", {}).get("resourceId") != resource_id:
+                # A shelter is named in `shelter`, not `resource`. Matching
+                # only on `resource` meant a flooded shelter was marked
+                # unavailable while the people already approved for it stayed
+                # routed there, with no replan and no alert.
+                carrier_id = assignment.get("resource", {}).get("resourceId")
+                shelter_id = (assignment.get("shelter") or {}).get("resourceId")
+                if resource_id not in (carrier_id, shelter_id):
                     continue
                 if assignment.get("status") in ("COMPLETED", "CANCELLED", "UNAVAILABLE"):
                     continue
@@ -780,9 +937,23 @@ class RescueIQOrchestrator:
                 req["status"] = "PENDING"
                 req.pop("assignedResources", None)
                 self.resource_agent.update_request(req.get("requestId"), {"status": "PENDING", "assignedResources": []})
+                if shelter_id == resource_id and carrier_id:
+                    # The vehicle is fine, only its destination failed. Hand it
+                    # back to the pool or the replan has nothing to drive with,
+                    # and give the shelter back the beds nobody will occupy.
+                    people = assignment.get("wave_people", req.get("people_count", 0)) or 0
+                    freed = {"available": True, "currentLoad": 0, "assignedTo": None, "destinationNode": None}
+                    self.resource_agent.update_resource(carrier_id, freed)
+                    for item in self.resources:
+                        if item.get("resourceId") == carrier_id:
+                            item.update(freed)
+                    remaining = max(0, config.resource_load(resource) - people)
+                    resource["currentOccupancy"] = remaining
+                    self.resource_agent.update_resource(resource_id, {"currentOccupancy": remaining})
                 if req not in affected:
                     affected.append(req)
-            self._audit({"type": "resource_unavailable", "resourceId": resource_id,
+            self._audit({"type": "shelter_unavailable" if is_shelter else "resource_unavailable",
+                         "resourceId": resource_id,
                          "reason": reason, "affected_requests": [r.get("requestId") for r in affected],
                          "timestamp": datetime.now(timezone.utc).isoformat()})
             if not affected:
@@ -845,7 +1016,7 @@ class RescueIQOrchestrator:
                 "pending_edges": sorted(self._closure_changes),
                 "debounce_seconds": self._closure_debounce_seconds,
                 "graph_revision": self.router.revision,
-                "summary": f"Network change queued; routes will be recomputed once after {self._closure_debounce_seconds} seconds without another change."}
+                "summary": f"Network change queued; routes will be recomputed once after {self._closure_debounce_seconds:g} seconds without another change."}
 
     def _flush_network_replan(self):
         with self._approval_lock:
@@ -977,19 +1148,26 @@ class RescueIQOrchestrator:
             self._closure_timer = None
             self._closure_deadline = None
             self._closure_changes.clear()
-        removed_requests = self.resource_agent.delete_docs(
-            "requests", [r.get("requestId") for r in self.current_requests]
-        )
+        self._cancel_simulated_checkins()
+        # Clear the collection rather than the in-memory ids: requests stored
+        # under an auto-id, and statuses that never enter the queue, both
+        # survived the old by-requestId delete and reappeared next run.
+        removed_requests = self.resource_agent.delete_all_requests()
         removed_assignments = self.resource_agent.delete_docs(
             "assignments", list(self._session_assignment_ids)
         )
+        removed_plans = self.resource_agent.delete_approved_plans()
+        self._approved_plans = []
 
         self.current_requests = []
         self.current_plan = None
         self.last_replan = None
         self._plan_reminders.clear()
         self.events = []
-        self._req_counter = self._req_id_base
+        # Every request document is gone, so numbering starts over at
+        # REQ_001 instead of continuing past ids nothing holds any more.
+        self._req_id_base = 0
+        self._req_counter = 0
         self._session_assignment_ids = set()
         self._session_assigned_request_ids = set()
         reset_closed_edges = set(self.graph_data.get("closedEdges", []))
@@ -1009,6 +1187,11 @@ class RescueIQOrchestrator:
                 not r.get("available", True)
                 or config.resource_load(r)
                 or r.get("currentNode")
+                # An idle vehicle can still carry a destination from a run
+                # that ended by another path. Without this it is never
+                # rewritten, so the stale destination outlives every reset.
+                or r.get("destinationNode")
+                or r.get("assignedTo")
             )
             r["available"] = True
             r["currentLoad"] = 0
@@ -1035,6 +1218,7 @@ class RescueIQOrchestrator:
             "resources_freed": freed,
             "requests_removed": removed_requests,
             "assignments_removed": removed_assignments,
+            "approved_plans_removed": removed_plans,
         }
 
     def release_all_resources(self) -> dict:

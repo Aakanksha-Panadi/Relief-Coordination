@@ -10,6 +10,7 @@ closure -> replan -> metrics, and fails loudly if any step regresses.
 """
 import os
 import sys
+import time
 
 import httpx
 
@@ -33,7 +34,9 @@ def check(label, condition, detail=""):
 
 
 def main():
-    client = httpx.Client(base_url=BASE, timeout=30.0)
+    # Live Gemini intake and a full-queue dispatch plan both run longer
+    # than the old 30s ceiling, which failed the suite on latency alone.
+    client = httpx.Client(base_url=BASE, timeout=120.0)
 
     print("\n== 0. reset ==")
     r = client.post("/reset")
@@ -45,7 +48,9 @@ def main():
     check("health ok", body.get("status") == "healthy", str(body))
 
     print("\n== 2. resources summary ==")
-    summary = client.get("/resources/summary").json()
+    # /resources/summary nests the per-type totals under `by_type` and
+    # reports which fleet is live alongside them.
+    summary = client.get("/resources/summary").json()["by_type"]
     check("has boats", "boat" in summary, str(summary))
     print(f"      {summary}")
 
@@ -109,7 +114,7 @@ def main():
     approved = client.post("/dispatch/approve", json={"approved_by": "coordinator"}).json()
     check("assignments approved", approved.get("approved_count", 0) > 0,
           str(approved.get("approved_count")))
-    after = client.get("/resources/summary").json()
+    after = client.get("/resources/summary").json()["by_type"]
     check("resources marked busy",
           after["boat"]["available"] < summary["boat"]["available"],
           f"{summary['boat']} -> {after['boat']}")
@@ -121,7 +126,18 @@ def main():
             closed_edge = a["route"]["edges"][0]
             break
     print(f"      closing {closed_edge}")
-    replan = client.post("/replan/road-closure", json={"edge_id": closed_edge}).json()
+    scheduled = client.post("/replan/road-closure", json={"edge_id": closed_edge}).json()
+    check("closure accepted", scheduled.get("closed") is True, str(scheduled)[:200])
+    # Closures are coalesced: the API acknowledges immediately and recomputes
+    # once the network has been quiet for REPLAN_DEBOUNCE_SECONDS. Poll the
+    # replan instead of expecting it inside the closure response.
+    deadline = time.monotonic() + max(30.0, scheduled.get("debounce_seconds", 3) * 5)
+    replan = {}
+    while time.monotonic() < deadline:
+        replan = client.get("/replan/current").json()
+        if replan.get("status") == "READY":
+            break
+        time.sleep(1)
     check("replan ran", "assignments" in replan, str(replan)[:200])
     print(f"      {replan.get('summary')}")
     print(f"      before: {replan.get('metrics_before')}")
@@ -137,7 +153,7 @@ def main():
         elif a["status"] == "BLOCKED":
             print(f"      BLOCKED {a['resource']['name']}")
     check("after-metrics cover all assignments",
-          replan["metrics_after"].get("avg_response_time", 0) > 0,
+          (replan.get("metrics_after") or {}).get("avg_response_time", 0) > 0,
           str(replan.get("metrics_after")))
 
     print("\n== 8. unknown edge rejected ==")
@@ -153,15 +169,15 @@ def main():
     reset_result = client.post("/reset").json()
     print(f"      {reset_result}")
     check("roads reopened", client.get("/graph").json()["closed_edges"] == [])
-    # With Firestore connected, seeded requests legitimately stay pending;
-    # what must be gone are the requests this session created.
+    # /reset clears the requests collection outright, so the queue must be
+    # empty rather than merely free of this session's ids. The old
+    # intersection check passed even while documents stored under an
+    # auto-generated id survived every reset.
     remaining = {
         r.get("requestId") for r in client.get("/requests").json()["requests"]
     }
-    session_ids = set(created_ids)
-    check("session requests cleared", not (remaining & session_ids),
-          f"still present: {sorted(remaining & session_ids)}")
-    restored = client.get("/resources/summary").json()
+    check("all requests cleared", not remaining, f"still present: {sorted(remaining)}")
+    restored = client.get("/resources/summary").json()["by_type"]
     check("resources freed", restored["boat"]["available"] == summary["boat"]["available"],
           f"{restored['boat']} vs {summary['boat']}")
 

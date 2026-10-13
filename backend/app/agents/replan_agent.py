@@ -3,6 +3,8 @@ from app.config import (
     gemini_model,
     normalize_urgency,
     request_node,
+    resource_capacity,
+    resource_load,
     resource_node,
 )
 from app.optimizer.router import DistrictRouter
@@ -103,6 +105,11 @@ class ReplanAgent:
                 else:
                     replanned.append({**assignment, "status": "UNCHANGED"})
 
+        # The drop-off leg is part of the journey, so it has to survive the
+        # same closures. Only the pickup leg was recomputed above, which left
+        # evacuations routed through a road that had just shut.
+        shelter_alerts = self._refresh_shelter_legs(replanned)
+
         metrics_before = self._calc_metrics(current_assignments)
         metrics_after = self._calc_metrics(replanned, use_new=True)
 
@@ -119,6 +126,7 @@ class ReplanAgent:
         alerts = (["Road closures split the map; unreachable areas: " + "; ".join(
             ", ".join(item["name"] for item in area) for area in unreachable_areas
         )] if len(components) > 1 and unreachable_areas else [])
+        alerts.extend(shelter_alerts)
         return {
             "edge_closed": edge_ids,
             "affected_count": len(affected),
@@ -230,6 +238,84 @@ Return only the explanation.
             f"{edge_id} closed. Rerouted via {path} "
             f"({delay:+d} minutes). Coverage maintained."
         )
+
+    def _refresh_shelter_legs(self, replanned: list) -> list:
+        """Recheck each drop-off leg against the current graph.
+
+        Returns coordinator alerts. Where the assigned shelter is now
+        unreachable this swaps in the nearest reachable one with capacity and
+        power; where none exists the assignment is flagged for a human rather
+        than left pointing at a shelter nobody can drive to.
+        """
+        alerts = []
+        for assignment in replanned:
+            shelter = assignment.get("shelter")
+            if not shelter:
+                continue
+            request = assignment.get("request", {})
+            req_node = request_node(request)
+            if not req_node:
+                continue
+            arrival = assignment.get("new_route") or assignment.get("route") or {}
+            leg = self.router.shortest_path(req_node, resource_node(shelter))
+            # Whether the people are already in the boat changes how bad a
+            # blocked drop-off leg is, and it is the first thing a coordinator
+            # asks. Before mission check-ins existed this was unknowable.
+            aboard = assignment.get("mission_status") == "ABOARD"
+            who = "people already aboard" if aboard else "people not yet collected"
+
+            if leg.get("blocked"):
+                people = assignment.get("wave_people", request.get("people_count", 0)) or 0
+                alternatives = []
+                for candidate in self.resources:
+                    if candidate.get("type") != "shelter" or candidate.get("resourceId") == shelter.get("resourceId"):
+                        continue
+                    if candidate.get("available", True) is False:
+                        continue
+                    if candidate.get("powerAvailable", candidate.get("power_available", True)) is False:
+                        continue
+                    if resource_capacity(candidate) - resource_load(candidate) < people:
+                        continue
+                    candidate_leg = self.router.shortest_path(req_node, resource_node(candidate))
+                    if candidate_leg.get("blocked"):
+                        continue
+                    alternatives.append((candidate_leg.get("minutes", 10**9),
+                                         candidate.get("resourceId", ""), candidate, candidate_leg))
+                if alternatives:
+                    alternatives.sort(key=lambda item: (item[0], item[1]))
+                    _, _, replacement, replacement_leg = alternatives[0]
+                    assignment["shelter"] = replacement
+                    assignment["shelter_route"] = replacement_leg
+                    assignment["shelter_eta_minutes"] = replacement_leg.get("minutes")
+                    assignment["shelter_reassigned_from"] = shelter.get("resourceId")
+                    alerts.append(
+                        f"{request.get('requestId')} ({who}): "
+                        f"{shelter.get('name', shelter.get('resourceId'))} "
+                        f"is now unreachable; drop-off moved to "
+                        f"{replacement.get('name', replacement.get('resourceId'))}."
+                    )
+                    leg = replacement_leg
+                else:
+                    assignment["shelter_route"] = None
+                    assignment["shelter_eta_minutes"] = None
+                    assignment["shelter_blocked"] = True
+                    assignment["escalation_required"] = True
+                    alerts.append(
+                        f"{request.get('requestId')} ({who}): no reachable shelter with capacity "
+                        f"and power after road changes; "
+                        + ("vehicle is carrying people and needs a destination now."
+                           if aboard else "hold and alert coordinator.")
+                    )
+                    assignment["total_eta_minutes"] = None
+                    continue
+            else:
+                assignment["shelter_route"] = leg
+                assignment["shelter_eta_minutes"] = leg.get("minutes")
+                assignment.pop("shelter_blocked", None)
+
+            if arrival.get("minutes") is not None and leg.get("minutes") is not None:
+                assignment["total_eta_minutes"] = arrival["minutes"] + leg["minutes"]
+        return alerts
 
     def _calc_metrics(
         self, assignments: list, use_new: bool = False

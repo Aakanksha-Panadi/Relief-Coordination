@@ -108,14 +108,14 @@ export default function RequestsTab({
           </span>
         </div>
         <button
-          className="ghost-btn"
+          className="ghost-btn plan-btn"
           onClick={() => onGenerate(selectedRequest?.requestId ?? null)}
           disabled={planBusy || awaitingApproval}
           title={awaitingApproval ? 'Approve or reject the current plan first' : undefined}
         >
           {planBusy
             ? <><span className="spinner" /> Planning…</>
-            : selectedRequest ? 'Plan selected' : 'Plan pending'}
+            : selectedRequest ? 'Plan' : 'Plan All'}
         </button>
       </div>
     </>

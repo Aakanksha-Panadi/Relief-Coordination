@@ -172,6 +172,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   font-size: 12px; font-weight: 600; cursor: pointer; transition: all .15s;
 }
 .ghost-btn:hover:not(:disabled) { border-color: var(--border2); background: var(--surface); }
+.plan-btn { background: var(--green); color: #fff; border-color: var(--green); }
+.plan-btn:hover:not(:disabled) { background: #15803d; border-color: #15803d; }
 
 /* ── Offline banner ── */
 .offline-bar {

@@ -572,6 +572,85 @@ class RescueIQOrchestrator:
 
     # ---------- dispatch ----------
 
+    def _archive_completed_current_plan(self):
+        """Keep completed missions in history before replacing the live plan."""
+        plan = self.current_plan
+        approved_plans = getattr(self, "_approved_plans", [])
+        history_plan_by_assignment = {
+            assignment.get("assignmentId"): approved_plan.get("planId")
+            for approved_plan in approved_plans
+            for assignment in approved_plan.get("assignments", [])
+            if assignment.get("assignmentId")
+        }
+
+        completed_by_plan = {}
+        current_plan_id = plan.get("planId") if plan else None
+        sources = list(getattr(self, "_active_assignments", []))
+        if plan:
+            sources.extend(plan.get("assignments", []))
+        seen = set()
+        for assignment in sources:
+            if (assignment.get("status") != "COMPLETED"
+                    and assignment.get("mission_status") != "DELIVERED"):
+                continue
+            assignment_id = assignment.get("assignmentId")
+            if assignment_id and assignment_id in seen:
+                continue
+            if assignment_id:
+                seen.add(assignment_id)
+            plan_id = (
+                assignment.get("planId")
+                or history_plan_by_assignment.get(assignment_id)
+                or (
+                    current_plan_id
+                    if plan and assignment in plan.get("assignments", [])
+                    else None
+                )
+            )
+            if plan_id:
+                completed_by_plan.setdefault(plan_id, []).append(assignment)
+
+        for plan_id, completed in completed_by_plan.items():
+            history = next(
+                (item for item in approved_plans if item.get("planId") == plan_id),
+                None,
+            )
+            if history is None:
+                history = {
+                    "planId": plan_id,
+                    "approvedAt": (
+                        (plan or {}).get("generatedAt")
+                        or datetime.now(timezone.utc).isoformat()
+                    ),
+                    "approvedBy": None,
+                    "requestCount": 0,
+                    "assignmentCount": 0,
+                    "assignments": [],
+                }
+                approved_plans.append(history)
+
+            assignments_by_id = {
+                assignment.get("assignmentId"): assignment
+                for assignment in history.get("assignments", [])
+                if assignment.get("assignmentId")
+            }
+            for assignment in completed:
+                assignment_id = assignment.get("assignmentId")
+                if assignment_id:
+                    assignments_by_id[assignment_id] = assignment
+            history["assignments"] = list(assignments_by_id.values())
+            history["assignmentCount"] = len(history["assignments"])
+            history["requestCount"] = len({
+                assignment.get("requestId")
+                or (assignment.get("request") or {}).get("requestId")
+                for assignment in history["assignments"]
+            } - {None})
+            self.resource_agent.save_approved_plan(history)
+
+        approved_plans.sort(
+            key=lambda item: item.get("approvedAt", ""), reverse=True
+        )
+
     def generate_dispatch_plan(self, request_id: str | None = None) -> dict:
         if (self.current_plan
                 and self.current_plan.get("approval_status") == "WAITING"
@@ -621,6 +700,7 @@ class RescueIQOrchestrator:
             self.evaluator.baseline_plan(arrival_order), len(pending)
         )
 
+        self._archive_completed_current_plan()
         self.current_plan = self.dispatch.create_plan(pending)
         self.current_plan["planId"] = f"PLAN_{uuid.uuid4().hex[:8]}"
         self.current_plan["generatedAt"] = datetime.now(timezone.utc).isoformat()
@@ -854,6 +934,9 @@ class RescueIQOrchestrator:
                 "assignmentId": f"ASG_{uuid.uuid4().hex[:8]}",
                 "planId": self.current_plan.get("planId"),
                 "requestId": request.get("requestId"),
+                "request": dict(request),
+                "resource": dict(resource),
+                "shelter": dict(shelter) if shelter else None,
                 "resourceIds": [resource["resourceId"]] + ([shelter["resourceId"]] if shelter.get("resourceId") else []),
                 "shelterId": shelter.get("resourceId"),
                 "wave": assignment.get("wave"),
@@ -968,11 +1051,87 @@ class RescueIQOrchestrator:
         }
 
     def get_approved_plans(self) -> dict:
+        # Reconcile local mission state before reading persisted history. A
+        # completed assignment may no longer be part of the current plan.
+        self._archive_completed_current_plan()
+
         # Refresh from Firestore so approvals made by another coordinator show up.
         stored = self.resource_agent.get_approved_plans()
-        known = {plan.get("planId"): plan for plan in self._approved_plans}
-        known.update({plan.get("planId"): plan for plan in stored})
-        plans = sorted(known.values(), key=lambda plan: plan.get("approvedAt", ""), reverse=True)
+        known = {
+            plan.get("planId"): dict(plan)
+            for plan in stored
+            if plan.get("planId")
+        }
+        assignment_plan_ids = {
+            assignment.get("assignmentId"): plan_id
+            for plan_id, plan in known.items()
+            for assignment in plan.get("assignments", [])
+            if assignment.get("assignmentId")
+        }
+        get_completed = getattr(
+            self.resource_agent, "get_completed_assignments", lambda: []
+        )
+        for assignment in get_completed():
+            assignment_id = assignment.get("assignmentId")
+            plan_id = (
+                assignment.get("planId")
+                or assignment_plan_ids.get(assignment_id)
+            )
+            if not plan_id or not assignment_id:
+                continue
+            history = known.setdefault(plan_id, {
+                "planId": plan_id,
+                "approvedAt": assignment.get("approvedAt")
+                or datetime.now(timezone.utc).isoformat(),
+                "approvedBy": assignment.get("approvedBy"),
+                "assignments": [],
+            })
+            assignments_by_id = {
+                item.get("assignmentId"): item
+                for item in history.get("assignments", [])
+                if item.get("assignmentId")
+            }
+            assignments_by_id[assignment_id] = assignment
+            history["assignments"] = list(assignments_by_id.values())
+
+        for local in self._approved_plans:
+            plan_id = local.get("planId")
+            if not plan_id:
+                continue
+            merged = {
+                **known.get(plan_id, {}),
+                **{key: value for key, value in local.items() if key != "assignments"},
+            }
+            assignments_by_id = {
+                assignment.get("assignmentId"): assignment
+                for assignment in known.get(plan_id, {}).get("assignments", [])
+                if assignment.get("assignmentId")
+            }
+            for assignment in local.get("assignments", []):
+                assignment_id = assignment.get("assignmentId")
+                if not assignment_id:
+                    continue
+                persisted = assignments_by_id.get(assignment_id)
+                is_completed = (
+                    assignment.get("status") == "COMPLETED"
+                    or assignment.get("mission_status") == "DELIVERED"
+                )
+                if persisted is None or is_completed:
+                    assignments_by_id[assignment_id] = assignment
+            merged["assignments"] = list(assignments_by_id.values())
+            merged["assignmentCount"] = len(merged["assignments"])
+            merged["requestCount"] = len({
+                assignment.get("requestId")
+                or (assignment.get("request") or {}).get("requestId")
+                for assignment in merged["assignments"]
+            } - {None})
+            known[plan_id] = merged
+
+        plans = sorted(
+            known.values(),
+            key=lambda plan: plan.get("approvedAt", ""),
+            reverse=True,
+        )
         self._approved_plans = plans
         return {"count": len(plans), "plans": plans}
 
@@ -1039,6 +1198,7 @@ class RescueIQOrchestrator:
                     match.get("assignmentId"),
                     {"mission_status": match["mission_status"], "picked_up_at": now},
                 )
+                self._sync_approved_plan_assignment(match)
                 resource = match["resource"]
                 resource["currentNode"] = at_node
                 self.resource_agent.update_resource(
@@ -1161,6 +1321,7 @@ class RescueIQOrchestrator:
                 {"status": "COMPLETED", "mission_status": "DELIVERED",
                  "delivered_at": now},
             )
+            self._sync_approved_plan_assignment(match)
             released.append({"resourceId": resource["resourceId"], "currentNode": arrived_at})
         matches[0]["request"]["status"] = "COMPLETED"
         self.resource_agent.update_request(
@@ -1182,6 +1343,33 @@ class RescueIQOrchestrator:
             "released": True,
             "completedAt": now,
         }
+
+    def _sync_approved_plan_assignment(self, assignment: dict):
+        assignment_id = assignment.get("assignmentId")
+        if not assignment_id:
+            return
+        approved_plans = getattr(self, "_approved_plans", [])
+        changed = False
+        fields = (
+            "status", "mission_status", "picked_up_at", "delivered_at",
+            "route", "route_details", "shelter_route_details",
+            "eta_minutes", "shelter_eta_minutes", "total_eta_minutes",
+        )
+        for plan in approved_plans:
+            for saved in plan.get("assignments", []):
+                if saved.get("assignmentId") != assignment_id:
+                    continue
+                for field in fields:
+                    if field in assignment:
+                        saved[field] = assignment[field]
+                changed = True
+        if changed:
+            for plan in approved_plans:
+                if any(
+                    saved.get("assignmentId") == assignment_id
+                    for saved in plan.get("assignments", [])
+                ):
+                    self.resource_agent.save_approved_plan(plan)
 
     def mark_resource_unavailable(self, resource_id: str, reason: str) -> dict:
         """Remove a failed responder and prepare a human-approved replacement plan."""
@@ -1279,7 +1467,7 @@ class RescueIQOrchestrator:
         with self._closure_lock:
             self._closure_changes.add(edge_id)
             self.last_replan = None
-            if self.current_plan:
+            if self._pending_plan_assignments():
                 self.current_plan["status"] = "REPLAN_PENDING"
             if self._closure_timer:
                 self._closure_timer.cancel()
@@ -1297,6 +1485,15 @@ class RescueIQOrchestrator:
                 "graph_revision": self.router.revision,
                 "summary": f"Network change queued; routes will be recomputed once after {self._closure_debounce_seconds:g} seconds without another change."}
 
+    def _pending_plan_assignments(self) -> list:
+        """Assignments awaiting approval; approved missions are not repriced."""
+        return [
+            assignment
+            for assignment in (self.current_plan or {}).get("assignments", [])
+            if assignment.get("approval_status") != "APPROVED"
+            and assignment.get("status") in ("PENDING_APPROVAL", "PARTIAL")
+        ]
+
     def _flush_network_replan(self):
         with self._approval_lock:
             with self._closure_lock:
@@ -1306,7 +1503,17 @@ class RescueIQOrchestrator:
                 self._closure_deadline = None
             if not changed_edges or not self.current_plan:
                 return
-            assignments = self._tracked_assignments()
+            assignments = self._pending_plan_assignments()
+            if not assignments:
+                self.last_replan = {
+                    "status": "READY",
+                    "edge_closed": changed_edges,
+                    "affected_count": 0,
+                    "assignments": [],
+                    "summary": "No unapproved assignments to reroute; approved routes were left unchanged.",
+                    "graph_revision": self.router.revision,
+                }
+                return
             try:
                 result = self.replan.simulate_road_closure(
                     changed_edges, assignments, already_applied=True, replan_all=True
@@ -1359,19 +1566,38 @@ class RescueIQOrchestrator:
                         "mission_status": assignment.get("mission_status"),
                     },
                 )
+                self._sync_approved_plan_assignment(assignment)
 
-        self.current_plan["assignments"] = self.last_replan["assignments"]
-        replanned_by_id = {
-            assignment.get("assignmentId"): assignment
+        replanned_by_key = {
+            self._replan_assignment_key(assignment): assignment
             for assignment in self.last_replan["assignments"]
-            if assignment.get("assignmentId")
         }
-        for index, assignment in enumerate(self._active_assignments):
-            updated_assignment = replanned_by_id.get(assignment.get("assignmentId"))
-            if updated_assignment:
-                self._active_assignments[index] = updated_assignment
+        merged_assignments = []
+        for assignment in self.current_plan.get("assignments", []):
+            updated_assignment = replanned_by_key.get(
+                self._replan_assignment_key(assignment)
+            )
+            if updated_assignment is not None:
+                if (assignment.get("approval_status") != "APPROVED"
+                        and updated_assignment.get("status") in ("REPLANNED", "UNCHANGED")):
+                    updated_assignment["status"] = assignment.get("status")
+                merged_assignments.append(updated_assignment)
+            else:
+                merged_assignments.append(assignment)
+        self.current_plan["assignments"] = merged_assignments
         self.current_plan["graph_revision"] = self.router.revision
-        self.current_plan["status"] = "APPROVED" if all(a.get("status") not in ("BLOCKED", "RETURNING") for a in self.current_plan["assignments"]) else "PARTIAL"
+        pending_approvals = any(
+            assignment.get("status") in ("PENDING_APPROVAL", "PARTIAL")
+            and assignment.get("approval_status") != "APPROVED"
+            for assignment in merged_assignments
+        )
+        self.current_plan["approval_status"] = "WAITING" if pending_approvals else "APPROVED"
+        self.current_plan["status"] = (
+            "PARTIAL" if pending_approvals or any(
+                assignment.get("status") in ("BLOCKED", "RETURNING")
+                for assignment in merged_assignments
+            ) else "APPROVED"
+        )
         self._audit({"type": "replan_approved", "approvedBy": approved_by,
                      "updated_routes": updated, "graph_revision": self.router.revision,
                      "timestamp": datetime.now(timezone.utc).isoformat()})
@@ -1380,6 +1606,15 @@ class RescueIQOrchestrator:
             "approvedBy": approved_by,
             "approvedAt": datetime.now(timezone.utc).isoformat(),
         }
+
+    @staticmethod
+    def _replan_assignment_key(assignment: dict) -> tuple:
+        return (
+            assignment.get("assignmentId"),
+            assignment.get("request", {}).get("requestId"),
+            assignment.get("resource", {}).get("resourceId"),
+            assignment.get("wave"),
+        )
 
     def reopen_edge(self, edge_id: str) -> dict:
         with self._approval_lock:
@@ -1463,9 +1698,7 @@ class RescueIQOrchestrator:
             return {"error": "Could not release outstanding shelter reservations: "
                              + released_shelters.get("reason", "unknown error")}
         removed_requests = self.resource_agent.delete_all_requests()
-        removed_assignments = self.resource_agent.delete_docs(
-            "assignments", list(self._session_assignment_ids)
-        )
+        removed_assignments = self.resource_agent.delete_all_assignments()
         removed_plans = self.resource_agent.delete_approved_plans()
         self._approved_plans = []
 
@@ -1526,6 +1759,7 @@ class RescueIQOrchestrator:
             "requests_removed": removed_requests,
             "assignments_removed": removed_assignments,
             "approved_plans_removed": removed_plans,
+            "warnings": released_shelters.get("warnings", []),
         }
 
     def release_all_resources(self) -> dict:

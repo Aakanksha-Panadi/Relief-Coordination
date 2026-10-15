@@ -24,6 +24,7 @@ function isAssigned(r) {
  */
 export default function RequestsTab({
   requests,
+  plannedCount = 0,
   graph,
   selectedId,
   onSelect,
@@ -48,10 +49,13 @@ export default function RequestsTab({
       <div className="tab-body">
         {requests.length === 0 ? (
           <div className="empty">
-            <div className="empty-title">No requests yet</div>
+            <div className="empty-title">
+              {plannedCount > 0 ? 'All requests are planned' : 'No requests yet'}
+            </div>
             <div className="empty-sub">
-              Paste a message below and press Process request. It will appear here
-              with its extracted urgency and location.
+              {plannedCount > 0
+                ? 'Planned requests are shown in the Plans tab.'
+                : 'Paste a message below and press Process request. It will appear here with its extracted urgency and location.'}
             </div>
           </div>
         ) : (

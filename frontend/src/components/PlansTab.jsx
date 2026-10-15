@@ -69,6 +69,126 @@ function groupAssignments(plan, replan) {
   return buckets
 }
 
+function assignmentKey(assignment) {
+  const requestId = assignment.request?.requestId ?? assignment.requestId
+  const resourceId = assignment.resource?.resourceId ?? assignment.resourceIds?.[0]
+  if (requestId && resourceId) {
+    return `${requestId}:${resourceId}:${assignment.wave ?? ''}`
+  }
+  return assignment.assignmentId ?? JSON.stringify(assignment)
+}
+
+function groupByRequest(assignments) {
+  const groups = new Map()
+  for (const assignment of assignments) {
+    const requestId = assignment.request?.requestId ?? assignment.requestId ??
+      `unknown-${groups.size}`
+    if (!groups.has(requestId)) groups.set(requestId, [])
+    const items = groups.get(requestId)
+    const key = assignmentKey(assignment)
+    if (!items.some((item) => assignmentKey(item) === key)) {
+      items.push(assignment)
+    }
+  }
+  return [...groups.entries()].map(([requestId, items]) => ({ requestId, items }))
+}
+
+function mergeApprovedAssignments(plan, replan, approvedPlans) {
+  const assignments = new Map()
+  for (const approvedPlan of approvedPlans) {
+    for (const assignment of approvedPlan.assignments ?? []) {
+      const key = assignmentKey(assignment)
+      assignments.set(key, {
+        ...assignment,
+        approval_status: 'APPROVED',
+        planId: approvedPlan.planId,
+      })
+    }
+  }
+  for (const assignment of [...(plan?.assignments ?? []), ...(replan?.assignments ?? [])]) {
+    const key = assignmentKey(assignment)
+    assignments.set(key, { ...assignments.get(key), ...assignment })
+  }
+  return [...assignments.values()]
+}
+
+function RequestPlanCard({
+  assignments, graph, tone, open, onToggle, onSelect, selected, action,
+}) {
+  const primary = assignments[0]
+  const request = primary.request ?? { requestId: primary.requestId }
+  const requestId = request.requestId
+  const location = request.location_description ?? 'Unknown location'
+  const resources = [...new Set(assignments.map((item) =>
+    item.resource?.name ?? item.resource?.resourceId ??
+      item.resourceIds?.join(', '),
+  ).filter(Boolean))]
+  const route = primary.new_route ?? primary.route ?? primary.route_details ?? {}
+  const eta = route.minutes ?? primary.eta_minutes
+  const key = requestId ?? JSON.stringify(primary)
+
+  return (
+    <div className={`plan ${tone}${open ? ' open' : ''}${selected ? ' selected' : ''}`}>
+      <div
+        className="plan-row"
+        onClick={() => {
+          onToggle()
+          onSelect?.(requestId)
+        }}
+      >
+        <div className="plan-main">
+          <div className="plan-title">{location}</div>
+          <div className="plan-sub" title={requestId}>
+            {formatRequestId(requestId)}
+            {(request.people_count ?? primary.wave_people) != null &&
+              ` · ${request.people_count ?? primary.wave_people} people`}
+            {resources.length > 0 && ` · ${resources.join(', ')}`}
+          </div>
+        </div>
+        {eta != null && <span className={`plan-eta${tone === 'done' ? ' ghost' : ''}`}>{eta} min</span>}
+        {action}
+        <svg className="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+      </div>
+      {open && (
+        <div className="plan-detail">
+          <div className="detail-line">
+            <b>Request ID</b>
+            <span title={requestId}>{requestId ?? 'Unavailable'}</span>
+          </div>
+          {assignments.map((assignment, index) => {
+            const assignmentRoute = assignment.new_route ??
+              assignment.route ?? assignment.route_details ?? {}
+            const via = viaSummary(assignmentRoute, graph)
+            return (
+              <div className="assignment-detail" key={assignment.assignmentId ?? `${key}-${index}`}>
+                {assignments.length > 1 && (
+                  <div className="detail-line">
+                    <b>Assignment {index + 1}</b>
+                    <span>{assignment.resource?.name ?? assignment.resource?.resourceId ??
+                      assignment.resourceIds?.join(', ') ?? 'Resource'}</span>
+                  </div>
+                )}
+                {assignmentRoute.path_names?.length > 0 && (
+                  <div className="route-chain">{assignmentRoute.path_names.join(' → ')}</div>
+                )}
+                {via && <div className="detail-line"><b>Route</b><span>{via}</span></div>}
+                {assignment.shelter?.name && (
+                  <div className="detail-line"><b>Shelter</b><span>{assignment.shelter.name}</span></div>
+                )}
+                {assignment.explanation && (
+                  <div className="why-box">{assignment.explanation}</div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const MISSION_TEXT = {
   EN_ROUTE: 'En route to caller — awaiting pickup check-in',
   ABOARD: 'People aboard — en route to shelter',
@@ -93,7 +213,16 @@ export default function PlansTab({
 }) {
   const [openKey, setOpenKey] = useState(null)
 
-  const { needsApproval, inProgress, completed, blocked } = groupAssignments(plan, replan)
+  const effectiveReplan = Array.isArray(replan?.assignments) ? replan : null
+  const { needsApproval, completed, blocked } = groupAssignments(plan, effectiveReplan)
+  const approvedHistory = mergeApprovedAssignments(plan, replan, approvedPlans)
+  const approvedAssignments = approvedHistory
+    .filter((assignment) => bucketOf(assignment, false) === 'inProgress')
+  const approvedCompleted = approvedHistory
+    .filter((assignment) => bucketOf(assignment, false) === 'completed')
+  const plannedGroups = groupByRequest(needsApproval)
+  const approvedGroups = groupByRequest(approvedAssignments)
+  const completedGroups = groupByRequest([...completed, ...approvedCompleted])
   const unassigned = (plan?.unassigned ?? []).filter(
     (request) => request.status !== 'DISMISSED',
   )
@@ -140,12 +269,12 @@ export default function PlansTab({
           </div>
         )}
 
-        {needsApproval.length > 0 && (
+        {plannedGroups.length > 0 && (
           <Group
-            label="Needs approval"
-            count={needsApproval.length}
+            label="Planned"
+            count={plannedGroups.length}
             action={
-              replan ? (
+              effectiveReplan ? (
                 <button
                   className="btn-approve sm"
                   onClick={onApproveReplan}
@@ -156,38 +285,29 @@ export default function PlansTab({
                     : busy.approveReplan ? 'Approving…' : 'Approve replan'}
                 </button>
               ) : (
-                <>
-                  <button
-                    className="btn-approve sm"
-                    onClick={() => onApprove()}
-                    disabled={busy.approve || plan?.approval_status !== 'WAITING'}
-                  >
-                    {busy.approve ? 'Approving…' : `Approve all ${needsApproval.length}`}
-                  </button>
-                  <button
-                    className="ghost-btn sm"
-                    onClick={() => onReject?.('Coordinator rejected the proposed assignments.')}
-                    disabled={busy.reviewPlan}
-                  >
-                    Reject
-                  </button>
-                </>
+                <button
+                  className="ghost-btn sm"
+                  onClick={() => onReject?.('Coordinator rejected the proposed assignments.')}
+                  disabled={busy.reviewPlan}
+                >
+                  Reject plan
+                </button>
               )
             }
           >
-            {needsApproval.map((a, index) => {
-              const requestId = a.request?.requestId
-              const firstForRequest = needsApproval.findIndex(
-                (item) => item.request?.requestId === requestId,
-              ) === index
+            {plannedGroups.map(({ requestId, items }) => {
+              const key = `planned-${requestId}`
               return (
-                <PlanRow
-                  key={keyOf(a)} a={a} graph={graph} tone="urgent"
-                  open={openKey === keyOf(a)}
-                  onToggle={() => toggle(keyOf(a))}
+                <RequestPlanCard
+                  key={key}
+                  assignments={items}
+                  graph={graph}
+                  tone="urgent"
+                  open={openKey === key}
+                  onToggle={() => toggle(key)}
                   onSelect={onSelectRequest}
                   selected={requestId === selectedRequestId}
-                  approvalAction={!replan && firstForRequest && (
+                  action={!effectiveReplan && (
                     <button
                       type="button"
                       className="btn-approve sm"
@@ -195,8 +315,8 @@ export default function PlansTab({
                         event.stopPropagation()
                         onApproveAssignment?.(requestId)
                       }}
-                      disabled={busy.approve || plan?.approval_status !== 'WAITING'}
-                      aria-label={`Approve ${a.request?.location_description || 'request'}`}
+                      disabled={busy.approve || replanPending || plan?.approval_status !== 'WAITING'}
+                      aria-label={`Approve ${items[0].request?.location_description || 'request'}`}
                     >
                       Approve
                     </button>
@@ -207,23 +327,28 @@ export default function PlansTab({
           </Group>
         )}
 
-        {inProgress.length > 0 && (
-          <Group label="In progress" count={inProgress.length}>
-            {inProgress.map((a, index) => {
-              const requestId = a.request?.requestId
-              const firstForRequest = inProgress.findIndex(
-                (item) => item.request?.requestId === requestId,
-              ) === index
+        {approvedGroups.length > 0 && (
+          <Group label="Approved" count={approvedGroups.length}>
+            {approvedGroups.map(({ requestId, items }) => {
+              const key = `approved-${requestId}`
+              const primary = items[0]
               return (
-                <PlanRow
-                  key={keyOf(a)} a={a} graph={graph} tone="calm"
-                  open={openKey === keyOf(a)}
-                  onToggle={() => toggle(keyOf(a))}
+                <RequestPlanCard
+                  key={key}
+                  assignments={items}
+                  graph={graph}
+                  tone="calm"
+                  open={openKey === key}
+                  onToggle={() => toggle(key)}
                   onSelect={onSelectRequest}
                   selected={requestId === selectedRequestId}
-                  rowAction={firstForRequest && (
-                    <ProgressAction a={a} busy={busy} onReportProgress={onReportProgress} />
-                  )}
+                  action={
+                    <ProgressAction
+                      a={primary}
+                      busy={busy}
+                      onReportProgress={onReportProgress}
+                    />
+                  }
                 />
               )
             })}
@@ -272,24 +397,23 @@ export default function PlansTab({
           </Group>
         )}
 
-        {(completed.length > 0 || approvedPlans.length > 0) && (
-          <Group label="Completed" count={completed.length + approvedPlans.length}>
-            {completed.map((a) => (
-              <PlanRow
-                key={keyOf(a)} a={a} graph={graph} tone="done"
-                open={openKey === keyOf(a)}
-                onToggle={() => toggle(keyOf(a))}
-                onSelect={onSelectRequest}
-                selected={a.request?.requestId === selectedRequestId}
-              />
-            ))}
-            {approvedPlans.map((p) => (
-              <HistoryRow
-                key={p.planId} p={p}
-                open={openKey === p.planId}
-                onToggle={() => toggle(p.planId)}
-              />
-            ))}
+        {completedGroups.length > 0 && (
+          <Group label="Completed" count={completedGroups.length}>
+            {completedGroups.map(({ requestId, items }) => {
+              const key = `completed-${requestId}`
+              return (
+                <RequestPlanCard
+                  key={key}
+                  assignments={items}
+                  graph={graph}
+                  tone="done"
+                  open={openKey === key}
+                  onToggle={() => toggle(key)}
+                  onSelect={onSelectRequest}
+                  selected={requestId === selectedRequestId}
+                />
+              )
+            })}
           </Group>
         )}
 
@@ -323,7 +447,7 @@ export default function PlansTab({
  * disable every other row.
  */
 function ProgressAction({ a, busy, onReportProgress }) {
-  const requestId = a.request?.requestId
+  const requestId = a.request?.requestId ?? a.requestId
   const canCheckIn = a.approval_status === 'APPROVED'
     && !['COMPLETED', 'CANCELLED', 'SUPERSEDED', 'UNAVAILABLE', 'BLOCKED', 'RETURNING'].includes(a.status)
   const needsPickup = a.mission_status === 'EN_ROUTE'
@@ -343,7 +467,7 @@ function ProgressAction({ a, busy, onReportProgress }) {
         onReportProgress?.(requestId, needsPickup ? 'picked_up' : 'delivered')
       }}
     >
-      {working ? 'Recording…' : needsPickup ? 'Mark picked up' : 'Mark reached'}
+      {working ? 'Recording…' : needsPickup ? 'Mark picked up' : 'Mark delivered'}
     </button>
   )
 }

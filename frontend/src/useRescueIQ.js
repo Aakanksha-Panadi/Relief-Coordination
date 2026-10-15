@@ -223,7 +223,7 @@ export function useRescueIQ() {
       const result = await run('intake', () => api.processBatch(messages))
       if (result) {
         notify(`${result.processed} messages extracted`, 'success')
-        await Promise.all([loadRequests(), loadSummary()])
+        await Promise.all([loadRequests(), loadSummary(), loadApprovedPlans()])
       }
       return result
     },
@@ -271,10 +271,10 @@ export function useRescueIQ() {
         `Plan ready — ${result.total_assigned} assigned, ${result.total_unassigned} unassigned`,
         'success',
       )
-      await loadMetrics()
+      await Promise.all([loadMetrics(), loadApprovedPlans()])
     }
     return result
-  }, [run, notify, loadMetrics])
+  }, [run, notify, loadMetrics, loadApprovedPlans])
 
   const approvePlan = useCallback(async (requestId = null) => {
     const result = await run('approve', () => api.approvePlan('coordinator', requestId))
@@ -391,14 +391,14 @@ export function useRescueIQ() {
         : 'Delivery recorded; assigned resources are available again',
       'success',
     )
-    await Promise.all([loadRequests(), loadSummary()])
+    await Promise.all([loadRequests(), loadSummary(), loadApprovedPlans()])
     try {
       setPlan(await api.currentPlan())
     } catch (error) {
       notify(`Check-in recorded, but the plan could not be refreshed: ${error.message}`, 'warn')
     }
     return result
-  }, [run, notify, loadRequests, loadSummary])
+  }, [run, notify, loadRequests, loadSummary, loadApprovedPlans])
 
   const releaseAll = useCallback(async () => {
     const result = await run('release', () => api.releaseAllResources())
@@ -421,6 +421,9 @@ export function useRescueIQ() {
         `Reset — ${result.requests_removed} requests removed, ${result.resources_freed} resources freed`,
         'success',
       )
+      if (result.warnings?.length) {
+        notify(result.warnings.join('; '), 'warn')
+      }
       await refreshAll()
     }
     return result

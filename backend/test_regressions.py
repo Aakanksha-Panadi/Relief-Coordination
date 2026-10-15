@@ -32,6 +32,25 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(len(request_ids), 1000)
 
+    def test_reset_clears_all_assignment_documents(self):
+        deleted = []
+        documents = [
+            SimpleNamespace(reference=SimpleNamespace(
+                delete=lambda index=index: deleted.append(index),
+            ))
+            for index in range(3)
+        ]
+        collection = SimpleNamespace(stream=lambda: documents)
+        resource_agent = ResourceAgent(None)
+        resource_agent.db = SimpleNamespace(
+            collection=Mock(return_value=collection),
+        )
+
+        removed = resource_agent.delete_all_assignments()
+
+        self.assertEqual(removed, 3)
+        self.assertEqual(deleted, [0, 1, 2])
+
     def test_approving_one_request_leaves_other_requests_waiting(self):
         resource = {"resourceId": "BOAT_01", "name": "Rescue Boat 1"}
         assignments = [
@@ -75,6 +94,238 @@ class RegressionTests(unittest.TestCase):
         self.assertIsNone(assignments[1].get("approval_status"))
         reserved = orchestrator.resource_agent.reserve_plan_resources.call_args.args[0]
         self.assertEqual([a["request"]["requestId"] for a in reserved], ["REQ_A"])
+
+    def test_network_replan_only_updates_unapproved_assignments(self):
+        approved = {
+            "assignmentId": "ASG_APPROVED",
+            "request": {"requestId": "REQ_APPROVED"},
+            "resource": {"resourceId": "BOAT_01"},
+            "route": {"path": ["N01", "N02"], "edges": ["OLD_EDGE"]},
+            "approval_status": "APPROVED",
+            "status": "APPROVED",
+        }
+        pending = {
+            "request": {"requestId": "REQ_PENDING"},
+            "resource": {"resourceId": "BOAT_02"},
+            "route": {"path": ["N03", "N04"], "edges": ["CLOSED_EDGE"]},
+            "status": "PENDING_APPROVAL",
+        }
+        rerouted = {
+            **pending,
+            "old_route": pending["route"],
+            "new_route": {
+                "path": ["N03", "N05", "N04"],
+                "edges": ["ALT_1", "ALT_2"],
+                "minutes": 8,
+            },
+            "status": "REPLANNED",
+        }
+        orchestrator = RescueIQOrchestrator.__new__(RescueIQOrchestrator)
+        orchestrator.current_plan = {
+            "assignments": [approved, pending],
+            "approval_status": "WAITING",
+            "status": "REPLAN_PENDING",
+        }
+        orchestrator._active_assignments = [approved]
+        orchestrator._approval_lock = threading.RLock()
+        orchestrator._closure_lock = threading.Lock()
+        orchestrator._closure_changes = {"CLOSED_EDGE"}
+        orchestrator._closure_timer = None
+        orchestrator._closure_deadline = None
+        orchestrator.router = SimpleNamespace(revision=2)
+        orchestrator.replan = SimpleNamespace(
+            simulate_road_closure=Mock(return_value={
+                "assignments": [rerouted],
+                "affected_count": 1,
+            })
+        )
+        orchestrator.events = []
+
+        orchestrator._flush_network_replan()
+
+        replan_call = orchestrator.replan.simulate_road_closure.call_args
+        self.assertEqual(replan_call.args[1], [pending])
+        self.assertTrue(replan_call.kwargs["replan_all"])
+        self.assertEqual(
+            [item["request"]["requestId"]
+             for item in orchestrator.last_replan["assignments"]],
+            ["REQ_PENDING"],
+        )
+
+        orchestrator.resource_agent = SimpleNamespace(
+            update_resource=Mock(),
+            update_assignment=Mock(),
+        )
+        orchestrator._audit = Mock()
+        result = orchestrator._approve_replan_locked("coordinator")
+
+        self.assertEqual(result["updated_routes"], 1)
+        self.assertEqual(len(orchestrator.current_plan["assignments"]), 2)
+        current_approved, current_pending = orchestrator.current_plan["assignments"]
+        self.assertEqual(current_approved["route"]["edges"], ["OLD_EDGE"])
+        self.assertEqual(current_pending["route"]["edges"], ["ALT_1", "ALT_2"])
+        self.assertEqual(current_pending["status"], "PENDING_APPROVAL")
+        self.assertEqual(current_pending.get("approval_status"), None)
+        self.assertEqual(orchestrator.current_plan["approval_status"], "WAITING")
+
+    def test_mission_progress_is_saved_in_approved_plan_history(self):
+        history = {
+            "planId": "PLAN_TEST",
+            "assignments": [{
+                "assignmentId": "ASG_TEST",
+                "requestId": "REQ_TEST",
+                "status": "APPROVED",
+                "mission_status": "EN_ROUTE",
+            }],
+        }
+        orchestrator = RescueIQOrchestrator.__new__(RescueIQOrchestrator)
+        orchestrator._approved_plans = [history]
+        orchestrator.resource_agent = SimpleNamespace(
+            save_approved_plan=Mock(),
+        )
+
+        orchestrator._sync_approved_plan_assignment({
+            "assignmentId": "ASG_TEST",
+            "status": "COMPLETED",
+            "mission_status": "DELIVERED",
+            "delivered_at": "2026-10-15T12:00:00+00:00",
+        })
+
+        saved = history["assignments"][0]
+        self.assertEqual(saved["status"], "COMPLETED")
+        self.assertEqual(saved["mission_status"], "DELIVERED")
+        orchestrator.resource_agent.save_approved_plan.assert_called_once_with(history)
+
+    def test_completed_current_plan_is_archived_before_generating_another(self):
+        history = {
+            "planId": "PLAN_OLD",
+            "approvedAt": "2026-10-15T12:00:00+00:00",
+            "assignments": [{
+                "assignmentId": "ASG_OLD",
+                "requestId": "REQ_OLD",
+                "status": "APPROVED",
+                "mission_status": "EN_ROUTE",
+            }],
+        }
+        completed = {
+            "assignmentId": "ASG_OLD",
+            "requestId": "REQ_OLD",
+            "status": "COMPLETED",
+            "mission_status": "DELIVERED",
+        }
+        orchestrator = RescueIQOrchestrator.__new__(RescueIQOrchestrator)
+        orchestrator.current_plan = {
+            "planId": "PLAN_OLD",
+            "assignments": [completed],
+        }
+        orchestrator._approved_plans = [history]
+        orchestrator.resource_agent = SimpleNamespace(save_approved_plan=Mock())
+
+        orchestrator._archive_completed_current_plan()
+
+        saved_assignment = history["assignments"][0]
+        self.assertEqual(saved_assignment["status"], "COMPLETED")
+        self.assertEqual(saved_assignment["mission_status"], "DELIVERED")
+        orchestrator.resource_agent.save_approved_plan.assert_called_once_with(history)
+
+    def test_completed_prior_assignment_is_archived_when_current_plan_is_newer(self):
+        history = {
+            "planId": "PLAN_OLD",
+            "assignments": [{
+                "assignmentId": "ASG_OLD",
+                "requestId": "REQ_OLD",
+                "status": "APPROVED",
+                "mission_status": "EN_ROUTE",
+            }],
+        }
+        completed = {
+            "assignmentId": "ASG_OLD",
+            "requestId": "REQ_OLD",
+            "status": "COMPLETED",
+            "mission_status": "DELIVERED",
+        }
+        orchestrator = RescueIQOrchestrator.__new__(RescueIQOrchestrator)
+        orchestrator.current_plan = {
+            "planId": "PLAN_NEW",
+            "assignments": [{"request": {"requestId": "REQ_NEW"}}],
+        }
+        orchestrator._active_assignments = [completed]
+        orchestrator._approved_plans = [history]
+        orchestrator.resource_agent = SimpleNamespace(save_approved_plan=Mock())
+
+        orchestrator._archive_completed_current_plan()
+
+        saved_assignment = history["assignments"][0]
+        self.assertEqual(saved_assignment["status"], "COMPLETED")
+        self.assertEqual(saved_assignment["mission_status"], "DELIVERED")
+        orchestrator.resource_agent.save_approved_plan.assert_called_once_with(history)
+
+    def test_approved_history_refresh_preserves_local_completed_status(self):
+        persisted = {
+            "planId": "PLAN_OLD",
+            "assignments": [{
+                "assignmentId": "ASG_OLD",
+                "requestId": "REQ_OLD",
+                "status": "APPROVED",
+                "mission_status": "EN_ROUTE",
+            }],
+        }
+        local = {
+            "planId": "PLAN_OLD",
+            "assignments": [{
+                "assignmentId": "ASG_OLD",
+                "requestId": "REQ_OLD",
+                "status": "COMPLETED",
+                "mission_status": "DELIVERED",
+            }],
+        }
+        orchestrator = RescueIQOrchestrator.__new__(RescueIQOrchestrator)
+        orchestrator.current_plan = None
+        orchestrator._active_assignments = []
+        orchestrator._approved_plans = [local]
+        orchestrator.resource_agent = SimpleNamespace(
+            get_approved_plans=Mock(return_value=[persisted]),
+            save_approved_plan=Mock(),
+        )
+
+        result = orchestrator.get_approved_plans()
+
+        saved_assignment = result["plans"][0]["assignments"][0]
+        self.assertEqual(saved_assignment["status"], "COMPLETED")
+        self.assertEqual(saved_assignment["mission_status"], "DELIVERED")
+
+    def test_approved_history_refresh_reads_completed_assignment_record(self):
+        persisted = {
+            "planId": "PLAN_OLD",
+            "assignments": [{
+                "assignmentId": "ASG_OLD",
+                "requestId": "REQ_OLD",
+                "status": "APPROVED",
+                "mission_status": "EN_ROUTE",
+            }],
+        }
+        completed = {
+            "assignmentId": "ASG_OLD",
+            "planId": "PLAN_OLD",
+            "requestId": "REQ_OLD",
+            "status": "COMPLETED",
+            "mission_status": "DELIVERED",
+        }
+        orchestrator = RescueIQOrchestrator.__new__(RescueIQOrchestrator)
+        orchestrator.current_plan = None
+        orchestrator._active_assignments = []
+        orchestrator._approved_plans = []
+        orchestrator.resource_agent = SimpleNamespace(
+            get_approved_plans=Mock(return_value=[persisted]),
+            get_completed_assignments=Mock(return_value=[completed]),
+            save_approved_plan=Mock(),
+        )
+
+        result = orchestrator.get_approved_plans()
+
+        saved_assignment = result["plans"][0]["assignments"][0]
+        self.assertEqual(saved_assignment["status"], "COMPLETED")
+        self.assertEqual(saved_assignment["mission_status"], "DELIVERED")
 
     def test_dismiss_request_removes_from_active_queue_and_plan_but_keeps_record(self):
         request = {
@@ -251,6 +502,31 @@ class RegressionTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(resources[0]["currentOccupancy"], 45)
+
+    def test_stale_shelter_reservation_does_not_block_reset_cleanup(self):
+        resources = [{
+            "resourceId": "SHELTER_TEST",
+            "type": "shelter",
+            "capacity": 100,
+            "totalCapacity": 100,
+            "currentOccupancy": 0,
+            "available": True,
+        }]
+        resource_agent = ResourceAgent(None, resources)
+
+        result = resource_agent.release_shelter_reservations(
+            {"SHELTER_TEST": 43}
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(resources[0]["currentOccupancy"], 0)
+        self.assertEqual(
+            result["warnings"],
+            [
+                "Shelter SHELTER_TEST has 0 occupants, but 43 seats were marked "
+                "reserved; occupancy was left unchanged"
+            ],
+        )
 
 
 if __name__ == "__main__":

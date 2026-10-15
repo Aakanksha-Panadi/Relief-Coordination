@@ -175,6 +175,7 @@ class ResourceAgent:
                             for resource_id, ref in refs.items()
                         }
                         updates = {}
+                        warnings = []
                         for resource_id, snapshot in snapshots.items():
                             data = snapshot.to_dict() if snapshot and snapshot.exists else None
                             if not data:
@@ -182,10 +183,12 @@ class ResourceAgent:
                             occupied = resource_load(data)
                             reserved = reservations[resource_id]
                             if reserved > occupied:
-                                raise ValueError(
+                                warnings.append(
                                     f"Shelter {resource_id} has {occupied} occupants, "
-                                    f"but {reserved} seats are marked reserved"
+                                    f"but {reserved} seats were marked reserved; "
+                                    "occupancy was left unchanged"
                                 )
+                                continue
                             remaining = occupied - reserved
                             capacity = resource_capacity(data)
                             powered = data.get(
@@ -198,26 +201,28 @@ class ResourceAgent:
                             }
                         for resource_id, fields in updates.items():
                             txn.update(refs[resource_id], fields)
-                        return updates
+                        return {"updates": updates, "warnings": warnings}
 
-                    updates = release(transaction)
-                    return {"ok": True, "updates": updates}
+                    result = release(transaction)
+                    return {"ok": True, **result}
                 except Exception as exc:
                     return {"ok": False, "reason": str(exc)}
 
             by_id = {resource.get("resourceId"): resource for resource in self.mock_resources}
             updates = {}
+            warnings = []
             for resource_id, reserved in reservations.items():
                 shelter = by_id.get(resource_id)
                 if not shelter:
                     return {"ok": False, "reason": f"Shelter {resource_id} no longer exists"}
                 occupied = resource_load(shelter)
                 if reserved > occupied:
-                    return {
-                        "ok": False,
-                        "reason": f"Shelter {resource_id} has {occupied} occupants, "
-                                  f"but {reserved} seats are marked reserved",
-                    }
+                    warnings.append(
+                        f"Shelter {resource_id} has {occupied} occupants, "
+                        f"but {reserved} seats were marked reserved; "
+                        "occupancy was left unchanged"
+                    )
+                    continue
                 remaining = occupied - reserved
                 capacity = resource_capacity(shelter)
                 powered = shelter.get(
@@ -230,7 +235,7 @@ class ResourceAgent:
                 }
             for resource_id, fields in updates.items():
                 by_id[resource_id].update(fields)
-            return {"ok": True, "updates": updates}
+            return {"ok": True, "updates": updates, "warnings": warnings}
 
     def get_all_resources(self) -> list:
         """Live fleet from Firestore, or the hardcoded fallback.
@@ -341,6 +346,19 @@ class ResourceAgent:
         except Exception as e:
             print(f"Request collection clear failed: {e}")
         self._request_doc_ids.clear()
+        return removed
+
+    def delete_all_assignments(self) -> int:
+        """Clear assignment records so pre-reset missions cannot reappear."""
+        if not self.db:
+            return 0
+        removed = 0
+        try:
+            for doc in self.db.collection("assignments").stream():
+                doc.reference.delete()
+                removed += 1
+        except Exception as exc:
+            print(f"Assignment collection clear failed: {exc}")
         return removed
 
     def delete_approved_plans(self) -> int:
@@ -524,6 +542,22 @@ class ResourceAgent:
             ]
         except Exception as exc:
             print(f"Active assignment read failed: {exc}")
+            return []
+
+    def get_completed_assignments(self) -> list:
+        """Read persisted assignments whose missions have been delivered."""
+        if not self.db:
+            return []
+        try:
+            completed_statuses = {"COMPLETED"}
+            return [
+                record
+                for doc in self.db.collection("assignments").stream()
+                if (record := doc.to_dict() or {}).get("status") in completed_statuses
+                or record.get("mission_status") == "DELIVERED"
+            ]
+        except Exception as exc:
+            print(f"Completed assignment read failed: {exc}")
             return []
 
     def update_assignment(self, assignment_id: str, updates: dict):

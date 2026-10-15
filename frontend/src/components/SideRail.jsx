@@ -20,10 +20,20 @@ export default function SideRail({
 }) {
   const [tab, setTab] = useState('plans')
 
-  const planCount =
-    (rq.replan?.assignments ?? rq.plan?.assignments ?? []).length +
-    (rq.plan?.unassigned?.length ?? 0) +
-    rq.approvedPlans.length
+  const plannedRequestIds = new Set([
+    ...(rq.plan?.assignments ?? []).map((item) => item.request?.requestId),
+    ...(rq.plan?.unassigned ?? []).map((item) => item.requestId),
+    ...(rq.replan?.assignments ?? []).map((item) => item.request?.requestId ?? item.requestId),
+    ...rq.approvedPlans.flatMap((item) =>
+      (item.assignments ?? []).map((assignment) =>
+        assignment.request?.requestId ?? assignment.requestId,
+      ),
+    ),
+  ].filter(Boolean))
+  const visibleRequests = rq.requests.filter(
+    (request) => !plannedRequestIds.has(request.requestId),
+  )
+  const planCount = plannedRequestIds.size
 
   // A pending replan needs a decision, so surface it rather than leaving the
   // operator on whichever tab they happened to be reading.
@@ -37,7 +47,7 @@ export default function SideRail({
 
   const tabs = [
     { id: 'plans', label: 'Plans', count: planCount },
-    { id: 'reqs', label: 'Requests', count: rq.requests.length },
+    { id: 'reqs', label: 'Requests', count: visibleRequests.length },
     { id: 'res', label: 'Resources', count: rq.resources.length },
   ]
 
@@ -78,7 +88,8 @@ export default function SideRail({
 
       {tab === 'reqs' && (
         <RequestsTab
-          requests={rq.requests}
+          requests={visibleRequests}
+          plannedCount={plannedRequestIds.size}
           graph={rq.graph}
           selectedId={selectedId}
           onSelect={onSelect}

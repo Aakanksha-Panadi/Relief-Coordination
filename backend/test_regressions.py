@@ -32,6 +32,79 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(len(request_ids), 1000)
 
+    def test_approving_one_request_leaves_other_requests_waiting(self):
+        resource = {"resourceId": "BOAT_01", "name": "Rescue Boat 1"}
+        assignments = [
+            {
+                "request": {"requestId": request_id, "people_count": 2},
+                "resource": resource.copy(),
+                "route": {"path": ["N01", "N02"], "minutes": 5},
+                "status": "PENDING_APPROVAL",
+            }
+            for request_id in ("REQ_A", "REQ_B")
+        ]
+        orchestrator = RescueIQOrchestrator.__new__(RescueIQOrchestrator)
+        orchestrator.current_plan = {
+            "planId": "PLAN_TEST",
+            "assignments": assignments,
+            "approval_status": "WAITING",
+            "graph_revision": 1,
+        }
+        orchestrator.router = SimpleNamespace(revision=1)
+        orchestrator._approval_lock = threading.RLock()
+        orchestrator._session_assignment_ids = set()
+        orchestrator._session_assigned_request_ids = set()
+        orchestrator._active_assignments = []
+        orchestrator._approved_plans = []
+        orchestrator.resources = [resource]
+        orchestrator.resource_agent = SimpleNamespace(
+            reserve_plan_resources=Mock(return_value={"ok": True, "updates": {}}),
+            save_assignment=Mock(),
+            update_resource=Mock(),
+            update_request=Mock(),
+            save_approved_plan=Mock(),
+        )
+        orchestrator._audit = Mock()
+        orchestrator._schedule_simulated_checkins = Mock()
+
+        result = orchestrator.approve_plan(request_id="REQ_A")
+
+        self.assertEqual(result["approved_count"], 1)
+        self.assertEqual(result["approval_status"], "WAITING")
+        self.assertEqual(assignments[0]["approval_status"], "APPROVED")
+        self.assertIsNone(assignments[1].get("approval_status"))
+        reserved = orchestrator.resource_agent.reserve_plan_resources.call_args.args[0]
+        self.assertEqual([a["request"]["requestId"] for a in reserved], ["REQ_A"])
+
+    def test_dismiss_request_removes_from_active_queue_and_plan_but_keeps_record(self):
+        request = {
+            "requestId": "REQ_INFEASIBLE",
+            "status": "PENDING",
+            "people_count": 50,
+        }
+        orchestrator = RescueIQOrchestrator.__new__(RescueIQOrchestrator)
+        orchestrator.current_requests = [request]
+        orchestrator.current_plan = {
+            "unassigned": [request],
+            "total_unassigned": 1,
+            "metrics": {"unassigned": 1},
+        }
+        orchestrator._active_assignments = []
+        orchestrator._approval_lock = threading.RLock()
+        orchestrator.resource_agent = SimpleNamespace(save_request=Mock())
+        events = []
+        orchestrator._audit = events.append
+
+        result = orchestrator.dismiss_request("REQ_INFEASIBLE")
+
+        self.assertEqual(result["status"], "DISMISSED")
+        self.assertEqual(request["status"], "DISMISSED")
+        orchestrator.resource_agent.save_request.assert_called_once_with(request)
+        self.assertEqual(orchestrator.get_requests(), [])
+        self.assertEqual(orchestrator.current_plan["unassigned"], [])
+        self.assertEqual(orchestrator.current_plan["total_unassigned"], 0)
+        self.assertEqual(events[0]["type"], "request_dismissed")
+
     def test_gemini_quota_error_is_safely_reported_to_coordinator(self):
         agent = IntakeAgent.__new__(IntakeAgent)
         agent.model = SimpleNamespace(

@@ -274,6 +274,15 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .mission { font-size: 11px; font-weight: 600; color: var(--amber); margin-bottom: 6px; }
 .mission.aboard { color: var(--blue); }
 .plan-actions { display: flex; gap: 7px; margin-top: 8px; }
+.plan-inline-action {
+  flex: none; padding: 5px 8px; background: var(--green); color: #fff; border: none;
+  border-radius: var(--radius-sm); font-size: 10px; font-weight: 700; white-space: nowrap;
+  cursor: pointer;
+}
+.plan-inline-action:hover:not(:disabled) { background: #15803d; }
+.plan-inline-action.deliver { background: var(--blue); }
+.plan-inline-action.deliver:hover:not(:disabled) { background: #1d4ed8; }
+.plan-inline-action:disabled { opacity: .6; cursor: wait; }
 .btn-deliver {
   flex: 1; padding: 8px; background: var(--blue); color: #fff; border: none;
   border-radius: var(--radius); font-size: 12px; font-weight: 700; cursor: pointer;
@@ -497,6 +506,10 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   display: flex; align-items: center; gap: 8px;
 }
 .audit-line { font-size: 10.5px; color: var(--text3); flex: 1; line-height: 1.4; }
+.plan-target { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
+.plan-target-label { color: var(--text3); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.plan-target strong { overflow: hidden; color: var(--text2); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.plan-target-detail { overflow: hidden; color: var(--text3); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .btn-approve {
   flex: 1; padding: 10px; background: var(--green); color: #fff; border: none;
   border-radius: var(--radius); font-size: 13px; font-weight: 700;

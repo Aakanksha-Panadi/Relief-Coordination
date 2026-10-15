@@ -219,6 +219,12 @@ def review_request(request_id: str, payload: RequestReviewRequest):
     ))
 
 
+@app.post("/requests/{request_id}/dismiss", tags=["intake"])
+def dismiss_request(request_id: str):
+    """Dismiss an infeasible request from the active queue but retain its record."""
+    return unwrap(get_orchestrator().dismiss_request(request_id))
+
+
 # ---------- resources ----------
 
 
@@ -267,10 +273,10 @@ def dispatch_approved():
 
 
 @app.post("/dispatch/approve", tags=["dispatch"])
-def dispatch_approve(payload: ApprovalRequest | None = None):
-    """Human in the loop. Commits the plan and marks resources busy."""
+def dispatch_approve(payload: ApprovalRequest | None = None, request_id: str | None = None):
+    """Approve the whole plan or one request, then mark its resources busy."""
     approved_by = payload.approved_by if payload else "coordinator"
-    return unwrap(get_orchestrator().approve_plan(approved_by))
+    return unwrap(get_orchestrator().approve_plan(approved_by, request_id=request_id))
 
 
 @app.post("/dispatch/review", tags=["dispatch"])

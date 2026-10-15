@@ -10,7 +10,14 @@ import ResourcesTab from './ResourcesTab'
  * the same strip of screen. Only one of them answers the question you are
  * asking at any moment, so only one is on screen.
  */
-export default function SideRail({ rq, selectedId, onSelect, onApprovePlan }) {
+export default function SideRail({
+  rq,
+  selectedId,
+  onSelect,
+  onApprovePlan,
+  onDismissRequest,
+  requestFocusVersion,
+}) {
   const [tab, setTab] = useState('plans')
 
   const planCount =
@@ -23,6 +30,10 @@ export default function SideRail({ rq, selectedId, onSelect, onApprovePlan }) {
   useEffect(() => {
     if (rq.replan) setTab('plans')
   }, [rq.replan])
+
+  useEffect(() => {
+    if (requestFocusVersion > 0) setTab('reqs')
+  }, [requestFocusVersion])
 
   const tabs = [
     { id: 'plans', label: 'Plans', count: planCount },
@@ -55,12 +66,13 @@ export default function SideRail({ rq, selectedId, onSelect, onApprovePlan }) {
           approvedPlans={rq.approvedPlans}
           busy={rq.busy}
           selectedRequestId={selectedId}
-          onGenerate={rq.generatePlan}
           onApprove={onApprovePlan ?? rq.approvePlan}
+          onApproveAssignment={onApprovePlan ?? rq.approvePlan}
           onReject={rq.reviewPlan}
           onApproveReplan={rq.approveReplan}
           onReportProgress={rq.reportProgress}
           onSelectRequest={onSelect}
+          onDismissRequest={onDismissRequest ?? rq.dismissRequest}
         />
       )}
 
@@ -72,6 +84,9 @@ export default function SideRail({ rq, selectedId, onSelect, onApprovePlan }) {
           onSelect={onSelect}
           onReview={rq.reviewRequest}
           reviewBusy={rq.busy.reviewRequest}
+          plan={rq.plan}
+          planBusy={rq.busy.plan}
+          onGenerate={rq.generatePlan}
         />
       )}
 

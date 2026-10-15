@@ -85,6 +85,8 @@ export const api = {
       method: 'PATCH',
       body: review,
     }),
+  dismissRequest: (requestId) =>
+    request(`/requests/${encodeURIComponent(requestId)}/dismiss`, { method: 'POST' }),
 
   resources: () => request('/resources'),
   resourceSummary: () => request('/resources/summary'),
@@ -97,8 +99,8 @@ export const api = {
   ),
   currentPlan: () => request('/dispatch/current'),
   approvedPlans: () => request('/dispatch/approved'),
-  approvePlan: (approvedBy = 'coordinator') =>
-    request('/dispatch/approve', {
+  approvePlan: (approvedBy = 'coordinator', requestId = null) =>
+    request(`/dispatch/approve${requestId ? `?request_id=${encodeURIComponent(requestId)}` : ''}`, {
       method: 'POST',
       body: { approved_by: approvedBy },
     }),

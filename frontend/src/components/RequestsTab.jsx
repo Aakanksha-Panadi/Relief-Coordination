@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { formatRequestId } from '../formatters'
 
 const URGENCY_RANK = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 }
@@ -29,64 +29,96 @@ export default function RequestsTab({
   onSelect,
   onReview,
   reviewBusy,
+  plan,
+  planBusy,
+  onGenerate,
 }) {
   const pending = requests
     .filter((r) => !isAssigned(r) && ['PENDING', 'UNPROCESSED', 'UNREACHABLE'].includes(r.status))
     .sort(byPriority)
   const assigned = requests.filter((r) => isAssigned(r) && r.status !== 'SERVED')
   const served = requests.filter((r) => r.status === 'SERVED')
-
-  if (requests.length === 0) {
-    return (
-      <div className="tab-body">
-        <div className="empty">
-          <div className="empty-title">No requests yet</div>
-          <div className="empty-sub">
-            Paste a message below and press Process request. It will appear here
-            with its extracted urgency and location.
-          </div>
-        </div>
-      </div>
-    )
-  }
+  const selectedRequest = requests.find((request) => request.requestId === selectedId)
+  const awaitingApproval =
+    plan?.approval_status === 'WAITING' &&
+    !['STALE', 'REJECTED', 'EDITED'].includes(plan?.status)
 
   return (
-    <div className="tab-body">
-      {pending.length > 0 && (
-        <div className="group">
-          <div className="group-head">
-            <span>Pending</span>
-            <span className="group-count">{pending.length}</span>
-            <span className="rule" />
-            <span className="group-note">by urgency</span>
+    <>
+      <div className="tab-body">
+        {requests.length === 0 ? (
+          <div className="empty">
+            <div className="empty-title">No requests yet</div>
+            <div className="empty-sub">
+              Paste a message below and press Process request. It will appear here
+              with its extracted urgency and location.
+            </div>
           </div>
-          {pending.map((req) => (
-            <RequestCard
-              key={req.requestId}
-              req={req}
-              selected={req.requestId === selectedId}
-              onSelect={onSelect}
-              nodes={graph?.nodes ?? {}}
-              onReview={onReview}
-              reviewBusy={reviewBusy}
-            />
-          ))}
-        </div>
-      )}
+        ) : (
+          <>
+            {pending.length > 0 && (
+              <div className="group">
+                <div className="group-head">
+                  <span>Pending</span>
+                  <span className="group-count">{pending.length}</span>
+                  <span className="rule" />
+                  <span className="group-note">by urgency</span>
+                </div>
+                {pending.map((req) => (
+                  <RequestCard
+                    key={req.requestId}
+                    req={req}
+                    selected={req.requestId === selectedId}
+                    onSelect={onSelect}
+                    nodes={graph?.nodes ?? {}}
+                    onReview={onReview}
+                    reviewBusy={reviewBusy}
+                  />
+                ))}
+              </div>
+            )}
 
-      {assigned.length > 0 && (
-        <CompactGroup
-          label="Assigned" items={assigned} tone="ASSIGNED"
-          selectedId={selectedId} onSelect={onSelect}
-        />
-      )}
-      {served.length > 0 && (
-        <CompactGroup
-          label="Served" items={served} tone="SERVED"
-          selectedId={selectedId} onSelect={onSelect}
-        />
-      )}
-    </div>
+            {assigned.length > 0 && (
+              <CompactGroup
+                label="Assigned" items={assigned} tone="ASSIGNED"
+                selectedId={selectedId} onSelect={onSelect}
+              />
+            )}
+            {served.length > 0 && (
+              <CompactGroup
+                label="Served" items={served} tone="SERVED"
+                selectedId={selectedId} onSelect={onSelect}
+              />
+            )}
+          </>
+        )}
+      </div>
+      <div className="rail-foot">
+        <div className="plan-target">
+          <span className="plan-target-label">Planning</span>
+          <strong>
+            {selectedRequest
+              ? selectedRequest.location_description || 'Unknown location'
+              : 'All pending requests'}
+          </strong>
+          <span className="plan-target-detail">
+            {selectedRequest
+              ? `${formatRequestId(selectedRequest.requestId)}${selectedRequest.people_count != null ? ` · ${selectedRequest.people_count} people` : ''}`
+              : 'Select a request to plan it individually'}
+          </span>
+        </div>
+        <button
+          className="ghost-btn"
+          onClick={() => onGenerate(selectedRequest?.requestId ?? null)}
+          disabled={planBusy || awaitingApproval}
+          title={awaitingApproval ? 'Approve or reject the current plan first' : undefined}
+        >
+          {planBusy
+            ? <><span className="spinner" /> Planning…</>
+            : selectedRequest ? 'Plan selected' : 'Plan pending'}
+        </button>
+      </div>
+    </>
   )
 }
 
@@ -124,6 +156,7 @@ function CompactGroup({ label, items, tone, selectedId, onSelect }) {
 }
 
 function RequestCard({ req, selected, onSelect, nodes, onReview, reviewBusy }) {
+  const cardRef = useRef(null)
   const urgency = req.urgency ?? 'LOW'
   // Anything the extractor could not resolve is held until a human supplies
   // the missing fields, rather than being dispatched on a guess.
@@ -134,9 +167,14 @@ function RequestCard({ req, selected, onSelect, nodes, onReview, reviewBusy }) {
     needsReview ? 'has-review' : '',
   ].filter(Boolean).join(' ')
 
+  useEffect(() => {
+    if (selected) cardRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [selected])
+
   return (
     <>
     <button
+      ref={cardRef}
       type="button"
       className={className}
       onClick={() => onSelect(selected ? null : req.requestId)}

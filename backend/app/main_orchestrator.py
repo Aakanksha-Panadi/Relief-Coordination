@@ -10,7 +10,7 @@ from app import config
 from app.agents.intake_agent import IntakeAgent
 from app.agents.dispatch_agent import DispatchAgent
 from app.agents.replan_agent import ReplanAgent
-from app.agents.resource_agent import ResourceAgent
+from app.agents.resource_agent import PersistenceError, ResourceAgent
 from app.optimizer.router import DistrictRouter
 from app.optimizer.evaluation import EvaluationHarness
 
@@ -434,7 +434,10 @@ class RescueIQOrchestrator:
         if not self.current_requests:
             self.current_requests = self.resource_agent.get_active_requests()
         self._collapse_duplicate_open_requests()
-        requests = self.current_requests
+        requests = [
+            request for request in self.current_requests
+            if request.get("status") != "DISMISSED"
+        ]
         # Assignment metadata is authoritative if a persisted status write was
         # delayed or failed; don't return an assigned case as queue-pending.
         for request in requests:
@@ -444,6 +447,64 @@ class RescueIQOrchestrator:
         if status:
             requests = [r for r in requests if r.get("status") == status]
         return requests
+
+    def dismiss_request(self, request_id: str, dismissed_by: str = "coordinator") -> dict:
+        with self._approval_lock:
+            request = next(
+                (item for item in self.current_requests
+                 if item.get("requestId") == request_id),
+                None,
+            )
+            if request is None:
+                return {"error": f"Request '{request_id}' was not found."}
+            if request.get("status") == "DISMISSED":
+                return {"error": f"Request '{request_id}' has already been dismissed."}
+            if request.get("status") in ("ASSIGNED", "SERVED", "COMPLETED"):
+                return {"error": "Assigned or completed requests cannot be dismissed."}
+            if any(
+                assignment.get("request", {}).get("requestId") == request_id
+                and assignment.get("approval_status") == "APPROVED"
+                for assignment in self._tracked_assignments()
+            ):
+                return {"error": "This request has an approved assignment and cannot be dismissed."}
+
+            now = datetime.now(timezone.utc).isoformat()
+            previous_status = request.get("status")
+            request.update({
+                "status": "DISMISSED",
+                "dismissedAt": now,
+                "dismissedBy": dismissed_by,
+            })
+            try:
+                self.resource_agent.save_request(request)
+            except PersistenceError:
+                request["status"] = previous_status
+                request.pop("dismissedAt", None)
+                request.pop("dismissedBy", None)
+                raise
+
+            if self.current_plan:
+                prior_count = len(self.current_plan.get("unassigned", []))
+                self.current_plan["unassigned"] = [
+                    item for item in self.current_plan.get("unassigned", [])
+                    if item.get("requestId") != request_id
+                ]
+                if len(self.current_plan["unassigned"]) < prior_count:
+                    self.current_plan["total_unassigned"] = max(
+                        0, (self.current_plan.get("total_unassigned") or prior_count) - 1
+                    )
+                    if self.current_plan.get("metrics"):
+                        self.current_plan["metrics"]["unassigned"] = max(
+                            0, self.current_plan["total_unassigned"]
+                        )
+
+            self._audit({
+                "type": "request_dismissed",
+                "requestId": request_id,
+                "dismissedBy": dismissed_by,
+                "timestamp": now,
+            })
+            return {"requestId": request_id, "status": "DISMISSED"}
 
     def review_request(self, request_id: str, updates: dict,
                        reviewed_by: str = "coordinator") -> dict:
@@ -689,11 +750,15 @@ class RescueIQOrchestrator:
         self.current_plan = replanned
         return {"decision": decision, "audit_event": event, "plan": replanned}
 
-    def approve_plan(self, approved_by: str = "coordinator") -> dict:
+    def approve_plan(
+        self, approved_by: str = "coordinator", request_id: str | None = None
+    ) -> dict:
         with self._approval_lock:
-            return self._approve_plan_locked(approved_by)
+            return self._approve_plan_locked(approved_by, request_id)
 
-    def _approve_plan_locked(self, approved_by: str) -> dict:
+    def _approve_plan_locked(
+        self, approved_by: str, request_id: str | None = None
+    ) -> dict:
         """Coordinator approval, the only path that commits a plan.
 
         Writes assignments to Firestore, marks resources busy and requests
@@ -707,6 +772,21 @@ class RescueIQOrchestrator:
         if self.current_plan.get("approval_status") != "WAITING":
             return {"error": "This plan is not awaiting approval. Generate a fresh plan before approving."}
 
+        assignments = self.current_plan.get("assignments", [])
+        if request_id:
+            assignments = [
+                assignment for assignment in assignments
+                if assignment.get("request", {}).get("requestId") == request_id
+            ]
+            if not assignments:
+                return {"error": f"Request '{request_id}' is not part of the current plan."}
+            if any(
+                assignment.get("approval_status") == "APPROVED"
+                or assignment.get("status") not in ("PENDING_APPROVAL", "PARTIAL")
+                for assignment in assignments
+            ):
+                return {"error": f"Request '{request_id}' is not awaiting approval."}
+
         if self.current_plan.get("graph_revision") != self.router.revision:
             self.current_plan["status"] = "STALE"
             event = {"type": "plan_rejected_stale", "planId": self.current_plan.get("planId"),
@@ -717,7 +797,7 @@ class RescueIQOrchestrator:
             return {"error": "Plan is stale because roads changed after planning; generate a new plan before approval."}
 
         reservation = self.resource_agent.reserve_plan_resources(
-            self.current_plan.get("assignments", [])
+            assignments
         )
         if not reservation.get("ok"):
             event = {"type": "plan_rejected_unavailable_resource", "planId": self.current_plan.get("planId"),
@@ -733,7 +813,7 @@ class RescueIQOrchestrator:
                         shelter["status"] = "UNAVAILABLE"
                 requests = []
                 seen = set()
-                for assignment in self.current_plan.get("assignments", []):
+                for assignment in assignments:
                     req = assignment.get("request", {})
                     if req.get("status") in (None, "PENDING") and req.get("requestId") not in seen:
                         requests.append(req)
@@ -762,7 +842,7 @@ class RescueIQOrchestrator:
         approved = []
         now = datetime.now(timezone.utc).isoformat()
 
-        for assignment in self.current_plan.get("assignments", []):
+        for assignment in assignments:
             if assignment.get("status") not in ("PENDING_APPROVAL", "PARTIAL"):
                 continue
             resource = assignment["resource"]
@@ -832,22 +912,44 @@ class RescueIQOrchestrator:
             self._active_assignments.append(assignment)
             approved.append(record)
 
-        self.current_plan["approval_status"] = "APPROVED"
-        self.current_plan["status"] = "PARTIAL" if any(
+        pending_approvals = [
+            assignment for assignment in self.current_plan.get("assignments", [])
+            if assignment.get("status") in ("PENDING_APPROVAL", "PARTIAL")
+            and assignment.get("approval_status") != "APPROVED"
+        ]
+        self.current_plan["approval_status"] = "WAITING" if pending_approvals else "APPROVED"
+        self.current_plan["status"] = "PARTIAL" if pending_approvals or any(
             a.get("status") == "PARTIAL" and a.get("approval_status") == "APPROVED"
             for a in self.current_plan.get("assignments", [])
         ) else "APPROVED"
         self._audit({"type": "plan_approved", "count": len(approved),
                      "planId": self.current_plan.get("planId"),
+                     "requestId": request_id,
                      "approvedBy": approved_by, "timestamp": now})
         self.current_plan["total_approved_assignments"] = len(self._session_assignment_ids)
+        prior_approval = next(
+            (item for item in self._approved_plans
+             if item.get("planId") == self.current_plan.get("planId")),
+            {},
+        )
+        approved_by_id = {
+            assignment.get("assignmentId"): assignment
+            for assignment in prior_approval.get("assignments", [])
+            if assignment.get("assignmentId")
+        }
+        approved_by_id.update({
+            assignment.get("assignmentId"): assignment
+            for assignment in approved
+            if assignment.get("assignmentId")
+        })
+        all_approved = list(approved_by_id.values())
         approved_plan = {
             "planId": self.current_plan.get("planId"),
             "approvedAt": now,
             "approvedBy": approved_by,
-            "requestCount": len({assignment.get("requestId") for assignment in approved}),
-            "assignmentCount": len(approved),
-            "assignments": approved,
+            "requestCount": len({assignment.get("requestId") for assignment in all_approved}),
+            "assignmentCount": len(all_approved),
+            "assignments": all_approved,
         }
         self.resource_agent.save_approved_plan(approved_plan)
         self._schedule_simulated_checkins()
@@ -857,6 +959,7 @@ class RescueIQOrchestrator:
         return {
             "planId": self.current_plan.get("planId"),
             "plan_status": self.current_plan.get("status"),
+            "approval_status": self.current_plan.get("approval_status"),
             "approved_count": len(approved),
             "total_approved_assignments": len(self._session_assignment_ids),
             "assignments": approved,

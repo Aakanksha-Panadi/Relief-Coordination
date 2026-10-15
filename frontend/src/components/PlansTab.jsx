@@ -83,20 +83,20 @@ export default function PlansTab({
   approvedPlans = [],
   busy,
   selectedRequestId,
-  onGenerate,
   onApprove,
+  onApproveAssignment,
   onReject,
   onApproveReplan,
   onReportProgress,
   onSelectRequest,
+  onDismissRequest,
 }) {
   const [openKey, setOpenKey] = useState(null)
 
   const { needsApproval, inProgress, completed, blocked } = groupAssignments(plan, replan)
-  const unassigned = plan?.unassigned ?? []
-  const awaitingApproval =
-    plan?.approval_status === 'WAITING' &&
-    !['STALE', 'REJECTED', 'EDITED'].includes(plan?.status)
+  const unassigned = (plan?.unassigned ?? []).filter(
+    (request) => request.status !== 'DISMISSED',
+  )
   const replanPending = replan?.status === 'REPLAN_SCHEDULED'
 
   const toggle = (key) => setOpenKey((k) => (k === key ? null : key))
@@ -159,7 +159,7 @@ export default function PlansTab({
                 <>
                   <button
                     className="btn-approve sm"
-                    onClick={onApprove}
+                    onClick={() => onApprove()}
                     disabled={busy.approve || plan?.approval_status !== 'WAITING'}
                   >
                     {busy.approve ? 'Approving…' : `Approve all ${needsApproval.length}`}
@@ -175,30 +175,58 @@ export default function PlansTab({
               )
             }
           >
-            {needsApproval.map((a) => (
-              <PlanRow
-                key={keyOf(a)} a={a} graph={graph} tone="urgent"
-                open={openKey === keyOf(a)}
-                onToggle={() => toggle(keyOf(a))}
-                onSelect={onSelectRequest}
-                selected={a.request?.requestId === selectedRequestId}
-              />
-            ))}
+            {needsApproval.map((a, index) => {
+              const requestId = a.request?.requestId
+              const firstForRequest = needsApproval.findIndex(
+                (item) => item.request?.requestId === requestId,
+              ) === index
+              return (
+                <PlanRow
+                  key={keyOf(a)} a={a} graph={graph} tone="urgent"
+                  open={openKey === keyOf(a)}
+                  onToggle={() => toggle(keyOf(a))}
+                  onSelect={onSelectRequest}
+                  selected={requestId === selectedRequestId}
+                  approvalAction={!replan && firstForRequest && (
+                    <button
+                      type="button"
+                      className="btn-approve sm"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onApproveAssignment?.(requestId)
+                      }}
+                      disabled={busy.approve || plan?.approval_status !== 'WAITING'}
+                      aria-label={`Approve ${a.request?.location_description || 'request'}`}
+                    >
+                      Approve
+                    </button>
+                  )}
+                />
+              )
+            })}
           </Group>
         )}
 
         {inProgress.length > 0 && (
           <Group label="In progress" count={inProgress.length}>
-            {inProgress.map((a) => (
-              <PlanRow
-                key={keyOf(a)} a={a} graph={graph} tone="calm"
-                open={openKey === keyOf(a)}
-                onToggle={() => toggle(keyOf(a))}
-                onSelect={onSelectRequest}
-                selected={a.request?.requestId === selectedRequestId}
-                action={<ProgressAction a={a} busy={busy} onReportProgress={onReportProgress} />}
-              />
-            ))}
+            {inProgress.map((a, index) => {
+              const requestId = a.request?.requestId
+              const firstForRequest = inProgress.findIndex(
+                (item) => item.request?.requestId === requestId,
+              ) === index
+              return (
+                <PlanRow
+                  key={keyOf(a)} a={a} graph={graph} tone="calm"
+                  open={openKey === keyOf(a)}
+                  onToggle={() => toggle(keyOf(a))}
+                  onSelect={onSelectRequest}
+                  selected={requestId === selectedRequestId}
+                  rowAction={firstForRequest && (
+                    <ProgressAction a={a} busy={busy} onReportProgress={onReportProgress} />
+                  )}
+                />
+              )
+            })}
           </Group>
         )}
 
@@ -225,6 +253,14 @@ export default function PlansTab({
                     </div>
                   </div>
                   <span className={`badge badge-${req.urgency}`}>{req.urgency}</span>
+                  <button
+                    type="button"
+                    className="ghost-btn sm"
+                    disabled={busy[`dismiss:${req.requestId}`]}
+                    onClick={() => onDismissRequest?.(req.requestId)}
+                  >
+                    {busy[`dismiss:${req.requestId}`] ? 'Dismissing…' : 'Dismiss'}
+                  </button>
                 </div>
                 <div className="plan-detail">
                   <div className="why-box why-red">
@@ -273,16 +309,6 @@ export default function PlansTab({
             ? `${plan.total_assigned} in this plan · ${plan.total_approved_assignments ?? 0} approved · ${plan.total_unassigned} unassigned`
             : 'Coordinator approval required before dispatch'}
         </span>
-        <button
-          className="ghost-btn"
-          onClick={() => onGenerate(selectedRequestId)}
-          disabled={busy.plan || awaitingApproval}
-          title={awaitingApproval ? 'Approve or reject the current plan first' : undefined}
-        >
-          {busy.plan
-            ? <><span className="spinner" /> Planning…</>
-            : selectedRequestId ? 'Plan selected' : 'Plan pending'}
-        </button>
       </div>
     </>
   )
@@ -308,30 +334,24 @@ function ProgressAction({ a, busy, onReportProgress }) {
   const working = busy[`progress:${requestId}`]
 
   return (
-    <div className="plan-actions">
-      {needsPickup ? (
-        <button
-          className="ghost-btn"
-          disabled={working}
-          onClick={(e) => { e.stopPropagation(); onReportProgress?.(requestId, 'picked_up') }}
-        >
-          {working ? 'Recording…' : 'Record pickup'}
-        </button>
-      ) : (
-        <button
-          className="btn-deliver"
-          disabled={working}
-          onClick={(e) => { e.stopPropagation(); onReportProgress?.(requestId, 'delivered') }}
-        >
-          {working ? 'Recording…' : 'Mark delivered'}
-        </button>
-      )}
-    </div>
+    <button
+      type="button"
+      className={`plan-inline-action${needsDelivery ? ' deliver' : ''}`}
+      disabled={working}
+      onClick={(e) => {
+        e.stopPropagation()
+        onReportProgress?.(requestId, needsPickup ? 'picked_up' : 'delivered')
+      }}
+    >
+      {working ? 'Recording…' : needsPickup ? 'Mark picked up' : 'Mark reached'}
+    </button>
   )
 }
 
 function keyOf(a) {
-  return a.assignmentId ?? a.request?.requestId ?? a.resource?.resourceId ?? JSON.stringify(a).slice(0, 40)
+  return a.assignmentId ??
+    ([a.request?.requestId, a.resource?.resourceId, a.wave].filter(Boolean).join('-') ||
+      JSON.stringify(a).slice(0, 40))
 }
 
 function Group({ label, count, action, children }) {
@@ -348,7 +368,9 @@ function Group({ label, count, action, children }) {
   )
 }
 
-function PlanRow({ a, graph, tone, open, onToggle, onSelect, selected, action }) {
+function PlanRow({
+  a, graph, tone, open, onToggle, onSelect, selected, action, approvalAction, rowAction,
+}) {
   const route = a.new_route ?? a.route ?? {}
   const old = a.old_route
   const replanned = a.status === 'REPLANNED'
@@ -383,6 +405,8 @@ function PlanRow({ a, graph, tone, open, onToggle, onSelect, selected, action })
             {route.minutes} min
           </span>
         )}
+        {approvalAction}
+        {rowAction}
         <svg className="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
           <path d="M6 9l6 6 6-6" />
         </svg>

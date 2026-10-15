@@ -12,18 +12,37 @@ import Toasts from './components/Toasts'
 export default function App() {
   const [tab, setTab] = useState('command')
   const [selectedId, setSelectedId] = useState(null)
+  const [requestFocusVersion, setRequestFocusVersion] = useState(0)
   const rq = useRescueIQ()
+
+  const submitMessage = async (message) => {
+    const result = await rq.submitMessage(message)
+    if (result) {
+      const requestId = result.linked_request_id ?? result.requestId
+      if (requestId) {
+        setSelectedId(requestId)
+        setRequestFocusVersion((version) => version + 1)
+      }
+    }
+    return result
+  }
 
   // An approved request leaves the queue, so a stale selection would keep
   // pointing at a card that is no longer there.
-  const approvePlan = async () => {
-    const result = await rq.approvePlan()
+  const approvePlan = async (requestId) => {
+    const result = await rq.approvePlan(requestId)
     if (result && !result.replanned) {
       const approvedIds = new Set(
         (result.assignments ?? []).map((assignment) => assignment.requestId),
       )
       if (approvedIds.has(selectedId)) setSelectedId(null)
     }
+    return result
+  }
+
+  const dismissRequest = async (requestId) => {
+    const result = await rq.dismissRequest(requestId)
+    if (result && selectedId === requestId) setSelectedId(null)
     return result
   }
 
@@ -70,7 +89,7 @@ export default function App() {
               />
               <ExtractionStrip data={rq.lastExtraction} />
               <IntakeBar
-                onSubmit={rq.submitMessage}
+                onSubmit={submitMessage}
                 onSubmitBatch={rq.submitBatch}
                 busy={rq.busy.intake}
               />
@@ -81,6 +100,8 @@ export default function App() {
               selectedId={selectedId}
               onSelect={setSelectedId}
               onApprovePlan={approvePlan}
+              onDismissRequest={dismissRequest}
+              requestFocusVersion={requestFocusVersion}
             />
           </div>
         ) : (

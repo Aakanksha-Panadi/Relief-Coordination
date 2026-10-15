@@ -242,6 +242,26 @@ export function useRescueIQ() {
     return result
   }, [run, notify, loadRequests])
 
+  const dismissRequest = useCallback(async (requestId) => {
+    const result = await run(`dismiss:${requestId}`, () => api.dismissRequest(requestId))
+    if (result) {
+      notify('Request dismissed from the active queue; its history was kept', 'success')
+      await loadRequests()
+      setPlan((current) => current ? {
+        ...current,
+        unassigned: (current.unassigned ?? []).filter(
+          (request) => request.requestId !== requestId,
+        ),
+        total_unassigned: Math.max(0, (current.total_unassigned ?? 0) - 1),
+        metrics: current.metrics ? {
+          ...current.metrics,
+          unassigned: Math.max(0, (current.metrics.unassigned ?? 0) - 1),
+        } : current.metrics,
+      } : current)
+    }
+    return result
+  }, [run, notify, loadRequests])
+
   const generatePlan = useCallback(async (requestId) => {
     const result = await run('plan', () => api.createPlan(requestId))
     if (result) {
@@ -256,8 +276,8 @@ export function useRescueIQ() {
     return result
   }, [run, notify, loadMetrics])
 
-  const approvePlan = useCallback(async () => {
-    const result = await run('approve', () => api.approvePlan())
+  const approvePlan = useCallback(async (requestId = null) => {
+    const result = await run('approve', () => api.approvePlan('coordinator', requestId))
     if (result) {
       if (result.replanned) {
         setPlan(result.plan)
@@ -273,9 +293,26 @@ export function useRescueIQ() {
         !newlyApprovedIds.includes(request.requestId)))
       setPlan((p) => (p ? {
         ...p,
-        status: result.plan_status ?? 'APPROVED',
-        approval_status: 'APPROVED',
+        status: result.plan_status ?? p.status,
+        approval_status: result.approval_status ?? p.approval_status,
         total_approved_assignments: result.total_approved_assignments ?? p.total_approved_assignments,
+        assignments: p.assignments?.map((assignment) => {
+          const approved = (result.assignments ?? []).find(
+            (item) => item.requestId === assignment.request?.requestId &&
+              item.resourceIds?.includes(assignment.resource?.resourceId) &&
+              item.wave === assignment.wave,
+          )
+          return approved
+            ? {
+                ...assignment,
+                assignmentId: approved.assignmentId,
+                approval_status: 'APPROVED',
+                coverage_status: approved.coverage_status,
+                status: approved.coverage_status === 'PARTIAL' ? 'PARTIAL' : 'APPROVED',
+                mission_status: approved.mission_status,
+              }
+            : assignment
+        }),
       } : p))
       await Promise.all([loadRequests(), loadSummary(), loadApprovedPlans()])
     }
@@ -407,6 +444,7 @@ export function useRescueIQ() {
     submitMessage,
     submitBatch,
     reviewRequest,
+    dismissRequest,
     generatePlan,
     approvePlan,
     reviewPlan,

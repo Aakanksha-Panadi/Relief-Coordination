@@ -63,7 +63,7 @@ export default function IntakeBar({ onSubmit, onSubmitBatch, busy }) {
     onKeyDown,
     disabled: busy,
     placeholder:
-      'Paste a message as a resident would, in any language — Hindi, Tamil, English or mixed',
+      'Hi, I am a rescue coordinator. Please let me know how I can help you today. Describe what happened, where, how many people, and urgent needs. Example: 4 trapped near Ward 7 temple; elderly person cannot walk.',
   }
 
   return (

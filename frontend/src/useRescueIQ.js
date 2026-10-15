@@ -13,6 +13,7 @@ export function useRescueIQ() {
   const [health, setHealth] = useState(null)
   const [graph, setGraph] = useState(null)
   const [requests, setRequests] = useState([])
+  const [resources, setResources] = useState([])
   const [approvedPlans, setApprovedPlans] = useState([])
   const [summary, setSummary] = useState({})
   const [plan, setPlan] = useState(null)
@@ -78,6 +79,15 @@ export function useRescueIQ() {
     }
   }, [])
 
+  const loadResources = useCallback(async () => {
+    try {
+      const data = await api.resources()
+      setResources(data?.resources ?? [])
+    } catch {
+      /* the fleet list is refreshed on the next poll */
+    }
+  }, [])
+
   const loadApprovedPlans = useCallback(async () => {
     try {
       const data = await api.approvedPlans()
@@ -105,8 +115,10 @@ export function useRescueIQ() {
   }, [])
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([loadRequests(), loadSummary(), loadGraph(), loadApprovedPlans()])
-  }, [loadRequests, loadSummary, loadGraph, loadApprovedPlans])
+    await Promise.all([
+      loadRequests(), loadSummary(), loadGraph(), loadResources(), loadApprovedPlans(),
+    ])
+  }, [loadRequests, loadSummary, loadGraph, loadResources, loadApprovedPlans])
 
   // Initial load.
   useEffect(() => {
@@ -144,6 +156,7 @@ export function useRescueIQ() {
     const timer = setInterval(() => {
       loadRequests()
       loadSummary()
+      loadResources()
       loadApprovedPlans()
       api.currentPlan().then((nextPlan) => {
         setPlan(nextPlan)
@@ -157,7 +170,7 @@ export function useRescueIQ() {
       }).catch(() => {})
     }, POLL_SECONDS * 1000)
     return () => clearInterval(timer)
-  }, [loadRequests, loadSummary, loadApprovedPlans, notify])
+  }, [loadRequests, loadSummary, loadResources, loadApprovedPlans, notify])
 
   // Closure changes are coalesced server-side for up to a minute. Poll only
   // while that batch is pending, then expose the single resulting replan.
@@ -323,10 +336,10 @@ export function useRescueIQ() {
       const result = await run('complete', () => api.completeRequest(requestId), {
         successMessage: `${requestId} marked served`,
       })
-      if (result) await Promise.all([loadRequests(), loadSummary()])
+      if (result) await Promise.all([loadRequests(), loadSummary(), loadResources()])
       return result
     },
-    [run, loadRequests, loadSummary],
+    [run, loadRequests, loadSummary, loadResources],
   )
 
   const reportProgress = useCallback(async (requestId, event) => {
@@ -354,10 +367,10 @@ export function useRescueIQ() {
     const result = await run('release', () => api.releaseAllResources())
     if (result) {
       notify(`${result.resources_freed} resources released`, 'success')
-      await loadSummary()
+      await Promise.all([loadSummary(), loadResources()])
     }
     return result
-  }, [run, notify, loadSummary])
+  }, [run, notify, loadSummary, loadResources])
 
   const resetAll = useCallback(async () => {
     const result = await run('reset', () => api.reset())
@@ -380,6 +393,7 @@ export function useRescueIQ() {
     health,
     graph,
     requests,
+    resources,
     approvedPlans,
     summary,
     plan,

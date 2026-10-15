@@ -203,6 +203,13 @@ export default function DistrictMap({
         Synthetic district graph · {Object.keys(nodes).length} nodes ·{' '}
         {Object.keys(graph.edges).length} roads · click a road to close it
       </div>
+
+      <div className="map-legend">
+        <span className="lg"><i style={{ background: '#bfccbf' }} /> open</span>
+        <span className="lg"><i style={{ background: '#2563eb' }} /> on a route</span>
+        {newEdges.size > 0 && <span className="lg"><i style={{ background: '#16a34a' }} /> rerouted</span>}
+        {closed.size > 0 && <span className="lg"><i style={{ background: '#ef4444' }} /> closed</span>}
+      </div>
     </div>
   )
 }

@@ -2,11 +2,10 @@ import { useState } from 'react'
 import { API_BASE } from './api'
 import { useRescueIQ } from './useRescueIQ'
 import TopBar from './components/TopBar'
-import IntakePanel from './components/IntakePanel'
-import RequestQueue from './components/RequestQueue'
+import IntakeBar from './components/IntakeBar'
+import ExtractionStrip from './components/ExtractionStrip'
 import DistrictMap from './components/DistrictMap'
-import DispatchPanel from './components/DispatchPanel'
-import ReplanBar from './components/ReplanBar'
+import SideRail from './components/SideRail'
 import MetricsView from './components/MetricsView'
 import Toasts from './components/Toasts'
 
@@ -15,6 +14,8 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(null)
   const rq = useRescueIQ()
 
+  // An approved request leaves the queue, so a stale selection would keep
+  // pointing at a card that is no longer there.
   const approvePlan = async () => {
     const result = await rq.approvePlan()
     if (result && !result.replanned) {
@@ -32,8 +33,12 @@ export default function App() {
         health={rq.health}
         summary={rq.summary}
         requests={rq.requests}
+        graph={rq.graph}
+        plan={rq.plan}
         tab={tab}
         onTab={setTab}
+        onCloseRoad={rq.closeRoad}
+        onReopenRoad={rq.reopenRoad}
         onReset={rq.resetAll}
         onReleaseAll={rq.releaseAll}
         busy={rq.busy}
@@ -52,53 +57,31 @@ export default function App() {
       <div className="body">
         {tab === 'command' ? (
           <div className="cmd-view">
-            <div className="left-panel">
-              <IntakePanel
+            {/* Map takes the width; intake docks beneath it rather than
+                occupying a column of its own. */}
+            <div className="map-col">
+              <DistrictMap
+                graph={rq.graph}
+                plan={rq.plan}
+                replan={rq.replan}
+                requests={rq.requests}
+                selectedRequestId={selectedId}
+                onCloseEdge={rq.closeRoad}
+              />
+              <ExtractionStrip data={rq.lastExtraction} />
+              <IntakeBar
                 onSubmit={rq.submitMessage}
                 onSubmitBatch={rq.submitBatch}
                 busy={rq.busy.intake}
-                extraction={rq.lastExtraction}
-              />
-              <RequestQueue
-                requests={rq.requests}
-                graph={rq.graph}
-                selectedId={selectedId}
-                onSelect={setSelectedId}
-                onReview={rq.reviewRequest}
-                reviewBusy={rq.busy.reviewRequest}
               />
             </div>
 
-            <DistrictMap
-              graph={rq.graph}
-              plan={rq.plan}
-              replan={rq.replan}
-              requests={rq.requests}
-              selectedRequestId={selectedId}
-              onCloseEdge={rq.closeRoad}
+            <SideRail
+              rq={rq}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onApprovePlan={approvePlan}
             />
-
-            <div className="right-panel">
-              <DispatchPanel
-                plan={rq.plan}
-                approvedPlans={rq.approvedPlans}
-                replan={rq.replan}
-                busy={rq.busy}
-                onGenerate={rq.generatePlan}
-                onApprove={approvePlan}
-                onReject={rq.reviewPlan}
-                onApproveReplan={rq.approveReplan}
-                onSelectRequest={setSelectedId}
-                onReportProgress={rq.reportProgress}
-              />
-              <ReplanBar
-                graph={rq.graph}
-                plan={rq.plan}
-                busy={rq.busy}
-                onClose={rq.closeRoad}
-                onReopen={rq.reopenRoad}
-              />
-            </div>
           </div>
         ) : (
           <MetricsView
@@ -111,42 +94,7 @@ export default function App() {
         )}
       </div>
 
-      <Footer health={rq.health} graph={rq.graph} />
       <Toasts toasts={rq.toasts} onDismiss={rq.dismissToast} />
-    </div>
-  )
-}
-
-function Footer({ health, graph }) {
-  const closed = graph?.closed_edges?.length ?? 0
-
-  return (
-    <div className="footer">
-      <span className="fi">
-        <span className={`fi-dot ${health ? 'green' : 'red'}`} />
-        API {API_BASE}
-      </span>
-      <span className="fi">
-        <span className={`fi-dot ${health?.firestore ? 'green' : 'amber'}`} />
-        Firestore {health?.firestore ? 'connected' : 'in-memory'}
-      </span>
-      <span className="fi">
-        <span className={`fi-dot ${health?.resource_source === 'firestore' ? 'green' : 'amber'}`} />
-        Fleet: {health?.resource_source ?? '—'} ({health?.resource_count ?? 0})
-      </span>
-      <span className="fi">
-        <span className={`fi-dot ${health?.mock_mode ? 'amber' : 'blue'}`} />
-        {health?.mock_mode ? 'Mock extraction' : 'Gemini live'}
-      </span>
-      {closed > 0 && (
-        <span className="fi">
-          <span className="fi-dot red" />
-          {closed} road{closed > 1 ? 's' : ''} closed
-        </span>
-      )}
-      <span className="fi" style={{ marginLeft: 'auto' }}>
-        Gemini understands · Python calculates · Humans approve
-      </span>
     </div>
   )
 }

@@ -1,0 +1,1112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RescueIQ — Relief Coordination (v2 layout)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ── Reset & Base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:       #f2f5f2;
+  --surface:  #faf8f5;
+  --surface2: #f5f7f5;
+  --border:   #dde5dd;
+  --border2:  #cbd5e1;
+  --text:     #0f172a;
+  --text2:    #475569;
+  --text3:    #94a3b8;
+  --blue:     #2563eb;
+  --blue-bg:  #eff6ff;
+  --blue-bd:  #bfdbfe;
+  --green:    #16a34a;
+  --green-bg: #f0fdf4;
+  --green-bd: #bbf7d0;
+  --red:      #dc2626;
+  --red-bg:   #fef2f2;
+  --red-bd:   #fecaca;
+  --amber:    #d97706;
+  --amber-bg: #fffbeb;
+  --amber-bd: #fde68a;
+  --radius:   10px;
+  --radius-sm:6px;
+  --radius-lg:14px;
+}
+html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+button, input, textarea { font-family: inherit; }
+
+.app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+/* ══ TOPBAR ══
+   The disruption simulator and the five footer status dots both live here
+   now, so neither takes a panel of its own. */
+.topbar {
+  height: 54px; background: var(--surface); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 16px; gap: 14px; flex-shrink: 0; z-index: 10;
+}
+.logo { display: flex; align-items: center; gap: 9px; }
+.logo-mark {
+  width: 30px; height: 30px; background: var(--text); border-radius: 8px;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.logo-mark svg { width: 14px; height: 14px; }
+.logo-name { font-size: 15px; font-weight: 800; letter-spacing: -0.4px; }
+.logo-sub { font-size: 11px; color: var(--text3); }
+
+.live-pill {
+  display: flex; align-items: center; gap: 5px;
+  background: var(--green-bg); border: 1px solid var(--green-bd);
+  border-radius: 20px; padding: 3px 10px;
+  font-size: 11px; font-weight: 600; color: var(--green); white-space: nowrap;
+}
+.live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+.nav { display: flex; gap: 2px; margin: 0 auto; }
+.nav-btn {
+  padding: 6px 16px; border-radius: 8px; font-size: 13px; font-weight: 500;
+  color: var(--text2); cursor: pointer; border: none; background: transparent; transition: all .15s;
+}
+.nav-btn.active {
+  background: var(--surface2); color: var(--text); font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0,0,0,.08), 0 0 0 1px var(--border);
+}
+
+.topbar-right { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.stat-run { display: flex; align-items: center; gap: 12px; font-size: 12px; white-space: nowrap; }
+.stat { display: flex; align-items: baseline; gap: 4px; }
+.stat b { font-size: 14px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--text3); font-weight: 500; }
+.stat.danger b { color: var(--red); }
+.stat.ok b { color: var(--green); }
+.vrule { width: 1px; height: 22px; background: var(--border); flex-shrink: 0; }
+
+.closure-ctl { display: flex; align-items: center; }
+.road-select {
+  appearance: none; font-size: 12px; font-weight: 500; color: var(--text2);
+  background: var(--surface2); border: 1.5px solid var(--border); border-right: none;
+  border-radius: var(--radius) 0 0 var(--radius);
+  padding: 7px 26px 7px 10px; max-width: 190px; cursor: pointer;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='3'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat: no-repeat; background-position: right 8px center; background-size: 11px;
+}
+.road-select:hover { border-color: var(--border2); }
+.btn-close-road {
+  padding: 7px 13px; background: var(--red-bg); border: 1.5px solid var(--red-bd);
+  border-radius: 0 var(--radius) var(--radius) 0; font-size: 12px; font-weight: 700;
+  color: var(--red); cursor: pointer; transition: all .15s; white-space: nowrap;
+}
+.btn-close-road:hover { background: #fee2e2; border-color: #f87171; }
+
+.health { position: relative; }
+.health-pill {
+  display: flex; align-items: center; gap: 6px; cursor: default;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 20px; padding: 4px 11px; font-size: 11px; font-weight: 600; color: var(--text2);
+}
+.health-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.health-pop {
+  position: absolute; top: calc(100% + 7px); right: 0; z-index: 30;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(15,23,42,.12); padding: 9px 12px;
+  display: none; flex-direction: column; gap: 5px; white-space: nowrap;
+}
+.health:hover .health-pop { display: flex; }
+.hp-row { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--text2); }
+.hp-dot { width: 5px; height: 5px; border-radius: 50%; }
+.hp-dot.green { background: var(--green); }
+.hp-dot.blue  { background: var(--blue); }
+.hp-dot.amber { background: var(--amber); }
+
+.btn-reset {
+  padding: 7px 12px; background: transparent; border: 1.5px solid var(--border);
+  border-radius: var(--radius); font-size: 12px; font-weight: 600; color: var(--text2);
+  cursor: pointer; transition: all .15s;
+}
+.btn-reset:hover { border-color: var(--border2); background: var(--surface2); }
+
+/* ══ BODY — two columns now that the queue lives in a tab ══ */
+.body { display: flex; flex: 1; overflow: hidden; }
+.cmd-view { display: grid; grid-template-columns: 1fr 384px; width: 100%; overflow: hidden; }
+.res-view { display: none; flex: 1; overflow-y: auto; padding: 16px; gap: 12px; flex-direction: column; background: var(--bg); }
+.res-view.show { display: flex; }
+
+.scroll::-webkit-scrollbar { width: 3px; }
+.scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+/* ══ MAP COLUMN: map on top, intake docked underneath ══ */
+.map-col { display: flex; flex-direction: column; overflow: hidden; }
+.map-panel { background: #eef2f7; position: relative; overflow: hidden; flex: 1; min-height: 0; }
+.map-overlay { position: absolute; top: 10px; left: 12px; display: flex; gap: 6px; z-index: 3; flex-wrap: wrap; }
+.map-chip { font-size: 10px; font-weight: 600; padding: 3px 10px; border-radius: 20px; }
+.mc-routes { background: var(--blue-bg); color: #1d4ed8; border: 1px solid var(--blue-bd); }
+.mc-new { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-bd); }
+.mc-closed { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-bd); display: none; }
+.map-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.map-foot { position: absolute; bottom: 9px; left: 14px; font-size: 10px; color: var(--text3); font-style: italic; }
+.map-legend {
+  position: absolute; bottom: 9px; right: 14px; display: flex; gap: 12px;
+  font-size: 10px; color: var(--text2); background: rgba(250,248,245,.86);
+  border: 1px solid var(--border); border-radius: 20px; padding: 5px 12px;
+}
+.lg { display: flex; align-items: center; gap: 5px; }
+.lg i { width: 14px; height: 2.5px; border-radius: 2px; display: block; }
+.edge { stroke: #c3cedd; stroke-width: 2.5; }
+.edge.active { stroke: var(--green); stroke-width: 4; }
+.edge.closed { stroke: var(--red); stroke-width: 2.5; stroke-dasharray: 7 5; }
+.edge-hit { stroke: transparent; stroke-width: 16; cursor: pointer; }
+.edge-lbl { font-size: 10px; fill: var(--text3); font-family: 'JetBrains Mono', monospace; }
+.node-lbl { font-size: 11px; fill: var(--text2); font-weight: 600; }
+
+/* ── Intake, docked below the map ── */
+.intake-bar {
+  background: var(--surface); border-top: 1px solid var(--border);
+  padding: 11px 14px 10px; flex-shrink: 0;
+}
+.intake-row { display: flex; gap: 8px; align-items: center; }
+.intake-row input {
+  flex: 1; font-size: 12.5px; color: var(--text);
+  background: var(--surface2); border: 1.5px solid var(--border);
+  border-radius: var(--radius); padding: 10px 12px;
+}
+.intake-row input:focus { outline: none; border-color: var(--blue-bd); background: var(--surface); }
+.intake-row input::placeholder { color: var(--text3); }
+.btn-primary {
+  padding: 10px 18px; background: var(--blue); color: #fff; border: none;
+  border-radius: var(--radius); font-size: 12.5px; font-weight: 700; cursor: pointer;
+  transition: background .15s; white-space: nowrap;
+}
+.btn-primary:hover { background: #1d4ed8; }
+.ghost-btn {
+  padding: 9px 14px; background: var(--surface2); color: var(--text2);
+  border: 1.5px solid var(--border); border-radius: var(--radius);
+  font-size: 12px; font-weight: 600; cursor: pointer; transition: all .15s; white-space: nowrap;
+}
+.ghost-btn:hover { border-color: var(--border2); background: var(--surface); }
+
+.intake-meta {
+  display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap;
+}
+.sample-chip {
+  font-size: 10px; font-weight: 500; color: var(--text2);
+  background: var(--surface2); border: 1px solid var(--border);
+  padding: 4px 9px; border-radius: 20px; cursor: pointer; transition: all .15s;
+}
+.sample-chip:hover { border-color: var(--border2); color: var(--text); }
+.intake-note { font-size: 10.5px; color: var(--text3); margin-left: auto; }
+
+/* The extraction readout kept its place in the flow — it is the visible proof
+   Gemini did the work — but laid out across the width instead of in a column. */
+.extract-strip {
+  display: none; background: var(--green-bg); border-top: 1px solid var(--green-bd);
+  padding: 9px 14px; flex-shrink: 0;
+}
+.extract-strip.show { display: block; }
+.extract-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; font-weight: 700; color: #166534; margin-bottom: 6px;
+}
+.extract-conf { font-weight: 600; color: #15803d; }
+.extract-x {
+  margin-left: auto; background: none; border: none; cursor: pointer;
+  color: #15803d; font-size: 15px; line-height: 1; padding: 0 2px;
+}
+.extract-fields { display: flex; flex-wrap: wrap; gap: 5px 7px; }
+.ef {
+  display: flex; align-items: baseline; gap: 5px;
+  background: rgba(255,255,255,.65); border: 1px solid var(--green-bd);
+  border-radius: var(--radius-sm); padding: 3px 8px; font-size: 11px;
+}
+.ef b { color: #15803d; font-weight: 500; }
+.ef span { color: #14532d; font-weight: 600; }
+
+/* ══ RIGHT: tabbed rail ══ */
+.right-panel {
+  background: var(--surface); border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 8px; gap: 2px; }
+.tab {
+  padding: 12px 12px 10px; background: transparent; border: none; cursor: pointer;
+  font-size: 12.5px; font-weight: 600; color: var(--text3);
+  border-bottom: 2px solid transparent; margin-bottom: -1px; transition: all .15s;
+  display: flex; align-items: center; gap: 6px;
+}
+.tab:hover { color: var(--text2); }
+.tab.active { color: var(--text); border-bottom-color: var(--blue); }
+.tab-count {
+  font-size: 10px; font-weight: 700; background: var(--surface2);
+  border: 1px solid var(--border); border-radius: 20px; padding: 1px 6px; color: var(--text2);
+}
+.tab.active .tab-count { background: var(--blue-bg); border-color: var(--blue-bd); color: var(--blue); }
+.tab-body { flex: 1; overflow-y: auto; display: none; }
+.tab-body.show { display: block; }
+
+.closure-bar {
+  margin: 10px 12px 0; background: var(--red-bg); border: 1.5px solid var(--red-bd);
+  border-radius: var(--radius); padding: 9px 11px;
+  font-size: 11.5px; color: var(--red); font-weight: 600;
+  display: none; align-items: flex-start; gap: 7px; line-height: 1.45;
+}
+.closure-bar.show { display: flex; }
+
+/* Lifecycle groups, shared by the Plans and Requests tabs. */
+.group { padding: 12px 12px 2px; }
+.group-head {
+  display: flex; align-items: center; gap: 7px; margin-bottom: 8px;
+  font-size: 10px; font-weight: 700; color: var(--text3); letter-spacing: .07em;
+}
+.group-head .rule { flex: 1; height: 1px; background: var(--border); }
+
+/* Collapsed row = one line. Everything else is behind the chevron. */
+.plan {
+  border: 1.5px solid var(--border); border-radius: var(--radius);
+  margin-bottom: 7px; background: var(--surface2); transition: all .15s; overflow: hidden;
+}
+.plan:hover { border-color: var(--border2); }
+.plan.open { background: var(--surface); border-color: var(--border2); box-shadow: 0 1px 3px rgba(15,23,42,.05); }
+.plan.urgent { border-left: 3px solid var(--red); }
+.plan.warn   { border-left: 3px solid var(--amber); }
+.plan.calm   { border-left: 3px solid var(--blue); }
+.plan.done   { border-left: 3px solid var(--green); opacity: .78; }
+
+.plan-row { display: flex; align-items: center; gap: 9px; padding: 10px 11px; cursor: pointer; user-select: none; }
+.plan-main { flex: 1; min-width: 0; }
+.plan-title { font-size: 12.5px; font-weight: 700; letter-spacing: -.1px; }
+.plan-sub { font-size: 11px; color: var(--text2); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plan-eta {
+  font-size: 11px; font-weight: 700; color: var(--blue);
+  background: var(--blue-bg); padding: 2px 8px; border-radius: 6px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.plan-eta.late { color: var(--amber); background: var(--amber-bg); }
+.plan-eta.ghost { color: var(--text3); background: transparent; font-weight: 600; }
+.plan-old { font-size: 10px; color: var(--text3); text-decoration: line-through; margin-right: 4px; }
+.chev { width: 13px; height: 13px; color: var(--text3); flex-shrink: 0; transition: transform .18s; }
+.plan.open .chev { transform: rotate(180deg); }
+
+.plan-detail { display: none; padding: 0 11px 11px; }
+.plan.open .plan-detail { display: block; }
+.detail-line { font-size: 11px; color: var(--text2); margin-bottom: 5px; display: flex; gap: 7px; }
+.detail-line b { color: var(--text); font-weight: 600; flex-shrink: 0; min-width: 52px; }
+.route-chain {
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--text2);
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 7px 9px; line-height: 1.6; margin-bottom: 7px;
+}
+.why-box { border-radius: 7px; padding: 8px 10px; font-size: 11px; line-height: 1.5; margin-bottom: 8px; }
+.why-green { background: var(--green-bg); color: #166534; border: 1px solid var(--green-bd); }
+.why-amber { background: var(--amber-bg); color: #78350f; border: 1px solid var(--amber-bd); }
+.why-red   { background: var(--red-bg);   color: #991b1b; border: 1px solid var(--red-bd); }
+.plan-actions { display: flex; gap: 7px; }
+.btn-approve {
+  flex: 1; padding: 8px; background: var(--green); color: #fff; border: none;
+  border-radius: var(--radius); font-size: 12px; font-weight: 700; cursor: pointer; transition: background .15s;
+}
+.btn-approve:hover { background: #15803d; }
+.btn-deliver {
+  flex: 1; padding: 8px; background: var(--blue); color: #fff; border: none;
+  border-radius: var(--radius); font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.btn-deliver:hover { background: #1d4ed8; }
+.mission { font-size: 11px; font-weight: 600; color: var(--amber); margin-bottom: 6px; }
+.mission.aboard { color: var(--blue); }
+
+.rail-foot {
+  padding: 10px 12px; border-top: 1px solid var(--border); flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px;
+}
+.audit-line { font-size: 10.5px; color: var(--text3); flex: 1; line-height: 1.4; }
+
+/* ══ Requests tab — the whole queue, nothing duplicated elsewhere ══ */
+.req-card {
+  width: 100%; text-align: left; display: block;
+  border: 1.5px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px; margin-bottom: 7px; cursor: pointer;
+  transition: all .15s; background: var(--surface2);
+}
+.req-card:hover { border-color: var(--border2); background: var(--surface); }
+.req-card.sel { border-color: var(--blue); background: var(--surface); box-shadow: 0 0 0 3px var(--blue-bg); }
+.req-card.sel.crit { border-color: var(--red); box-shadow: 0 0 0 3px var(--red-bg); }
+.req-card.sel.high { border-color: #f59e0b; box-shadow: 0 0 0 3px #fefce8; }
+.rh { display: flex; align-items: center; gap: 5px; margin-bottom: 5px; flex-wrap: wrap; }
+.badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 6px; letter-spacing: .02em; }
+.badge-CRITICAL { background: var(--red-bg); color: var(--red); }
+.badge-HIGH { background: var(--amber-bg); color: var(--amber); }
+.badge-MEDIUM { background: var(--blue-bg); color: var(--blue); }
+.lang-chip {
+  font-size: 10px; color: var(--text2); font-weight: 500;
+  background: var(--surface2); border: 1px solid var(--border); padding: 2px 7px; border-radius: 6px;
+}
+.conf-chip { font-size: 10px; color: var(--text3); margin-left: auto; font-variant-numeric: tabular-nums; }
+.req-text { font-size: 12.5px; font-weight: 600; margin-bottom: 3px; line-height: 1.35; }
+.req-raw { font-size: 11px; color: var(--text2); margin-bottom: 7px; line-height: 1.4; }
+.tags { display: flex; gap: 4px; flex-wrap: wrap; }
+.tag {
+  font-size: 10px; font-weight: 500; color: var(--text2);
+  background: var(--surface2); border: 1px solid var(--border); padding: 2px 7px; border-radius: 6px;
+}
+.warn-chip {
+  font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 6px;
+  background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-bd);
+}
+/* Already-handled requests collapse to one line — they are reference, not work. */
+.req-row {
+  display: flex; align-items: center; gap: 9px; padding: 9px 10px;
+  border: 1.5px solid var(--border); border-radius: var(--radius);
+  background: var(--surface2); margin-bottom: 6px;
+}
+.req-row-main { flex: 1; min-width: 0; }
+.req-row-title { font-size: 12px; font-weight: 600; }
+.req-row-sub { font-size: 10.5px; color: var(--text3); margin-top: 1px; }
+.status-chip { font-size: 9.5px; font-weight: 700; padding: 2px 7px; border-radius: 6px; letter-spacing: .03em; white-space: nowrap; }
+.st-ASSIGNED { background: var(--blue-bg); color: var(--blue); }
+.st-SERVED   { background: var(--green-bg); color: var(--green); }
+
+/* ══ Resources tab ══ */
+.fleet { padding: 12px; }
+.fleet-row {
+  display: flex; align-items: center; gap: 9px; padding: 9px 10px;
+  border: 1.5px solid var(--border); border-radius: var(--radius);
+  background: var(--surface2); margin-bottom: 6px;
+}
+.fleet-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.fleet-dot.free { background: var(--green); }
+.fleet-dot.busy { background: var(--amber); }
+.fleet-main { flex: 1; min-width: 0; }
+.fleet-name { font-size: 12px; font-weight: 600; }
+.fleet-sub { font-size: 10.5px; color: var(--text3); margin-top: 1px; }
+.fleet-cap { font-size: 10.5px; color: var(--text2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ══ RESULTS ══ */
+.res-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.res-title { font-size: 20px; font-weight: 800; letter-spacing: -.5px; }
+.res-chip {
+  font-size: 11px; color: var(--text2); font-weight: 500;
+  background: var(--surface); border: 1px solid var(--border); padding: 4px 12px; border-radius: 20px;
+}
+.metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.metric-card { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-lg); padding: 14px; }
+.mc-label { font-size: 10px; font-weight: 600; color: var(--text3); letter-spacing: .04em; margin-bottom: 6px; }
+.mc-val { font-size: 30px; font-weight: 800; color: var(--green); line-height: 1; letter-spacing: -1.5px; }
+.mc-val span { font-size: 14px; color: var(--text3); font-weight: 500; letter-spacing: 0; }
+.mc-base { font-size: 11px; color: var(--text3); margin-top: 5px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ══════════ TOPBAR ══════════ -->
+<header class="topbar">
+  <div class="logo">
+    <div class="logo-mark">
+      <svg viewBox="0 0 14 14" fill="none">
+        <line x1="7" y1="1" x2="7" y2="13" stroke="white" stroke-width="2" stroke-linecap="round"/>
+        <line x1="1" y1="7" x2="13" y2="7" stroke="white" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div>
+      <div class="logo-name">RescueIQ</div>
+      <div class="logo-sub">Relief coordination</div>
+    </div>
+  </div>
+  <div class="live-pill"><div class="live-dot"></div> Live Gemini</div>
+
+  <nav class="nav">
+    <button class="nav-btn active" id="navCmd" onclick="showView('cmd')">Command centre</button>
+    <button class="nav-btn" id="navRes" onclick="showView('res')">Results</button>
+  </nav>
+
+  <div class="topbar-right">
+    <div class="stat-run">
+      <div class="stat"><b id="sPending">6</b><span>pending</span></div>
+      <div class="stat danger"><b id="sCritical">5</b><span>critical</span></div>
+      <div class="stat ok"><b id="sFree">3</b><span>free</span></div>
+    </div>
+
+    <div class="vrule"></div>
+
+    <div class="closure-ctl">
+      <select class="road-select" id="roadSelect">
+        <option value="N09__N10">★ Bridge Road · 5m</option>
+        <option value="N06__N10">★ Hospital Road · 2m</option>
+        <option value="N04__N06">★ Market Road · 4m</option>
+        <option value="N04__N08">★ Market Road · 5m</option>
+        <option value="N03__N10">★ Temple Street · 3m</option>
+        <option value="N01__N06">Hospital Road · 3m</option>
+        <option value="N01__N07">School Lane · 4m</option>
+        <option value="N01__N10">Station Road · 4m</option>
+        <option value="N02__N04">Market Road · 5m</option>
+        <option value="N02__N08">Hall Road · 4m</option>
+        <option value="N02__N09">Riverside Drive · 6m</option>
+        <option value="N02__N11">Riverside Drive · 2m</option>
+        <option value="N03__N07">Temple Street · 3m</option>
+        <option value="N05__N09">Old Town Road · 4m</option>
+        <option value="N05__N12">Old Town Jetty Lane · 4m</option>
+        <option value="N08__N11">Jetty Road · 5m</option>
+        <option value="N09__N12">East Bank Road · 3m</option>
+      </select>
+      <button class="btn-close-road" onclick="closeRoad()">Close road</button>
+    </div>
+
+    <div class="health">
+      <div class="health-pill"><span class="health-dot"></span> All systems</div>
+      <div class="health-pop">
+        <div class="hp-row"><span class="hp-dot green"></span> API reachable</div>
+        <div class="hp-row"><span class="hp-dot green"></span> Firestore connected</div>
+        <div class="hp-row"><span class="hp-dot green"></span> Fleet: firestore (16)</div>
+        <div class="hp-row"><span class="hp-dot blue"></span> Gemini live</div>
+        <div class="hp-row"><span class="hp-dot amber"></span> <span id="hpClosed">0 roads closed</span></div>
+      </div>
+    </div>
+
+    <button class="btn-reset" onclick="resetAll()">Reset</button>
+  </div>
+</header>
+
+<!-- ══════════ BODY ══════════ -->
+<div class="body">
+<div class="cmd-view" id="cmdView">
+
+  <!-- ───── MAP + docked intake ───── -->
+  <div class="map-col">
+    <div class="map-panel">
+      <div class="map-overlay">
+        <span class="map-chip mc-routes" id="chipRoutes">43 active routes</span>
+        <span class="map-chip mc-new" id="chipNew">rerouted</span>
+        <span class="map-chip mc-closed" id="chipClosed">1 road closed</span>
+      </div>
+
+      <svg class="map-svg" viewBox="0 0 1000 620" preserveAspectRatio="xMidYMid meet" id="mapSvg">
+        <g id="edges"></g>
+        <g id="nodes"></g>
+      </svg>
+
+      <div class="map-foot">Synthetic district graph · 12 nodes · 17 roads · click a road to close it</div>
+      <div class="map-legend">
+        <span class="lg"><i style="background:#c3cedd"></i> open</span>
+        <span class="lg"><i style="background:#16a34a"></i> on a route</span>
+        <span class="lg"><i style="background:#dc2626"></i> closed</span>
+      </div>
+    </div>
+
+    <!-- Appears after a message is processed. -->
+    <div class="extract-strip" id="extractStrip">
+      <div class="extract-head">
+        <span>Extracted — <span id="exId">REQ-03F98C4F</span></span>
+        <span class="extract-conf" id="exConf">95% confidence</span>
+        <button class="extract-x" onclick="hideExtract()" title="Dismiss">×</button>
+      </div>
+      <div class="extract-fields" id="exFields">
+        <span class="ef"><b>Language</b><span>Hindi</span></span>
+        <span class="ef"><b>Urgency</b><span>CRITICAL</span></span>
+        <span class="ef"><b>People</b><span>4</span></span>
+        <span class="ef"><b>Location</b><span>Ward 7 near the temple</span></span>
+        <span class="ef"><b>Node</b><span>N05</span></span>
+        <span class="ef"><b>Needs</b><span>evacuation, shelter</span></span>
+        <span class="ef"><b>Vulnerable</b><span>Elderly mother who cannot walk</span></span>
+      </div>
+    </div>
+
+    <div class="intake-bar">
+      <div class="intake-row">
+        <input type="text" id="intakeText"
+               placeholder="Paste a message as a resident would, in any language — Hindi, Tamil, English or mixed">
+        <button class="btn-primary" onclick="processRequest()">Process request</button>
+        <button class="ghost-btn" onclick="loadAll()">Load all 5</button>
+      </div>
+      <div class="intake-meta">
+        <button class="sample-chip" onclick="fillSample(0)">Hindi</button>
+        <button class="sample-chip" onclick="fillSample(1)">Tamil</button>
+        <button class="sample-chip" onclick="fillSample(2)">English</button>
+        <button class="sample-chip" onclick="fillSample(3)">Mixed</button>
+        <button class="sample-chip" onclick="fillSample(4)">Medical</button>
+        <span class="intake-note">Simulates the WhatsApp channel · Ctrl+Enter to send · demo data only</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ───── RIGHT: tabbed rail ───── -->
+  <div class="right-panel">
+    <div class="tabs">
+      <button class="tab active" id="tabPlans" onclick="showTab('plans')">Plans <span class="tab-count">7</span></button>
+      <button class="tab" id="tabReqs" onclick="showTab('reqs')">Requests <span class="tab-count">10</span></button>
+      <button class="tab" id="tabRes" onclick="showTab('res')">Resources <span class="tab-count">16</span></button>
+    </div>
+
+    <!-- ── Plans ── -->
+    <div class="tab-body show scroll" id="bodyPlans">
+      <div class="closure-bar" id="closureBar">
+        <span>⚠</span>
+        <span id="closureText">Bridge Road closed · 2 plans recalculated</span>
+      </div>
+
+      <div class="group">
+        <div class="group-head"><span>NEEDS APPROVAL</span><span id="nApproval">3</span><span class="rule"></span></div>
+
+        <div class="plan urgent" id="plan1">
+          <div class="plan-row" onclick="togglePlan('plan1')">
+            <div class="plan-main">
+              <div class="plan-title">Rescue Boat 1 → Ward 3 Temple Street</div>
+              <div class="plan-sub" id="p1sub">5 people · via Market Road, Hospital Road, Temple Street</div>
+            </div>
+            <span class="plan-old" id="p1old" style="display:none">14 min</span>
+            <span class="plan-eta" id="p1eta">14 min</span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg>
+          </div>
+          <div class="plan-detail">
+            <div class="route-chain" id="p1chain">Community Hall (shelter site) → Ward 5 Market Road → Ward 9 Hospital Junction → Bridge Road West End → Ward 3 Temple Street</div>
+            <div class="detail-line"><b>Shelter</b><span>Community Hall Zone B</span></div>
+            <div class="detail-line"><b>Timing</b><span id="p1timing">14 min to reach them · 28 min to safety (+14 min shelter leg)</span></div>
+            <div class="why-box why-green" id="p1why">Nearest boat with capacity for 5. Three children on a rooftop with water rising, so this takes priority over the Ward 5 supply run.</div>
+            <div class="plan-actions">
+              <button class="btn-approve" onclick="approvePlan('plan1', event)">Approve</button>
+              <button class="ghost-btn" onclick="event.stopPropagation()">Reject &amp; replan</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="plan urgent" id="plan2">
+          <div class="plan-row" onclick="togglePlan('plan2')">
+            <div class="plan-main">
+              <div class="plan-title">Rescue Boat 3 → Ward 7 Old Town</div>
+              <div class="plan-sub">4 people · via East Bank Road, Old Town Jetty Lane</div>
+            </div>
+            <span class="plan-eta">9 min</span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg>
+          </div>
+          <div class="plan-detail">
+            <div class="route-chain">Boat Jetty B (East Bank) → Ward 7 Old Town</div>
+            <div class="detail-line"><b>Shelter</b><span>Govt School Zone A</span></div>
+            <div class="detail-line"><b>Timing</b><span>9 min to reach them · 21 min to safety</span></div>
+            <div class="why-box why-green">Elderly mother cannot walk, so the boat beaches at the temple steps rather than the jetty. Nearest unit already on the east bank.</div>
+            <div class="plan-actions">
+              <button class="btn-approve" onclick="approvePlan('plan2', event)">Approve</button>
+              <button class="ghost-btn" onclick="event.stopPropagation()">Reject &amp; replan</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="plan warn" id="plan3">
+          <div class="plan-row" onclick="togglePlan('plan3')">
+            <div class="plan-main">
+              <div class="plan-title">Supply Team 2 → Ward 5 Market Road</div>
+              <div class="plan-sub">6 people · via Market Road</div>
+            </div>
+            <span class="plan-eta">4 min</span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg>
+          </div>
+          <div class="plan-detail">
+            <div class="route-chain">Ward 9 Hospital Junction → Ward 5 Market Road</div>
+            <div class="detail-line"><b>Timing</b><span>4 min · food and water drop, no evacuation</span></div>
+            <div class="why-box why-green">Group is stable on an upper floor. Supply run rather than rescue, so a ground team is enough and both boats stay free.</div>
+            <div class="plan-actions">
+              <button class="btn-approve" onclick="approvePlan('plan3', event)">Approve</button>
+              <button class="ghost-btn" onclick="event.stopPropagation()">Reject &amp; replan</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="group-head"><span>IN PROGRESS</span><span id="nProgress">2</span><span class="rule"></span></div>
+
+        <div class="plan calm" id="plan4">
+          <div class="plan-row" onclick="togglePlan('plan4')">
+            <div class="plan-main">
+              <div class="plan-title">Rescue Boat 2 → Ward 1 Riverside</div>
+              <div class="plan-sub">1 person · people aboard, en route to shelter</div>
+            </div>
+            <span class="plan-eta">6 min</span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg>
+          </div>
+          <div class="plan-detail">
+            <div class="mission aboard">People aboard — en route to shelter</div>
+            <div class="route-chain">Boat Jetty A (Riverside) → Ward 1 Riverside → Community Hall (shelter site)</div>
+            <div class="detail-line"><b>Shelter</b><span>Community Hall Zone B</span></div>
+            <div class="why-box why-green">Dialysis patient. Routed to the hall because it has the generator and a clear road to Ward 9 Hospital Junction.</div>
+            <div class="plan-actions">
+              <button class="btn-deliver" onclick="markDelivered('plan4', event)">Mark delivered</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="plan calm" id="plan5">
+          <div class="plan-row" onclick="togglePlan('plan5')">
+            <div class="plan-main">
+              <div class="plan-title">Supply Team 5 → Ward 9 Hospital Junction</div>
+              <div class="plan-sub">12 people · on the way</div>
+            </div>
+            <span class="plan-eta">12 min</span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg>
+          </div>
+          <div class="plan-detail">
+            <div class="mission">En route to caller — awaiting pickup check-in</div>
+            <div class="route-chain">District Control Room → Ward 9 Hospital Junction</div>
+            <div class="why-box why-green">Rations and blankets for the school shelter. Lowest-urgency open task, so it took the last free ground team.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="group-head"><span>COMPLETED</span><span id="nDone">2</span><span class="rule"></span></div>
+
+        <div class="plan done" id="plan6">
+          <div class="plan-row" onclick="togglePlan('plan6')">
+            <div class="plan-main">
+              <div class="plan-title">Rescue Boat 4 → Ward 3 Temple Street</div>
+              <div class="plan-sub">8 people · delivered to Govt School</div>
+            </div>
+            <span class="plan-eta ghost">11 min</span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg>
+          </div>
+          <div class="plan-detail">
+            <div class="detail-line"><b>Approved</b><span>coordinator · 14 Oct, 4:58 PM</span></div>
+            <div class="detail-line"><b>Route</b><span>via Temple Street, School Lane</span></div>
+          </div>
+        </div>
+
+        <div class="plan done" id="plan7">
+          <div class="plan-row" onclick="togglePlan('plan7')">
+            <div class="plan-main">
+              <div class="plan-title">Supply Team 1 → Ward 1 Riverside</div>
+              <div class="plan-sub">20 people · supplies delivered</div>
+            </div>
+            <span class="plan-eta ghost">7 min</span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg>
+          </div>
+          <div class="plan-detail">
+            <div class="detail-line"><b>Approved</b><span>coordinator · 14 Oct, 4:41 PM</span></div>
+            <div class="detail-line"><b>Route</b><span>via Riverside Drive</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Requests: the full queue, the only place it appears ── -->
+    <div class="tab-body scroll" id="bodyReqs">
+      <div class="group">
+        <div class="group-head"><span>PENDING</span><span>6</span><span class="rule"></span>
+          <span style="letter-spacing:0;font-weight:500;text-transform:none">by urgency</span>
+        </div>
+
+        <button class="req-card sel crit" onclick="selectReq(this)">
+          <div class="rh">
+            <span class="badge badge-CRITICAL">CRITICAL</span>
+            <span class="lang-chip">Hindi</span>
+            <span class="conf-chip">95%</span>
+          </div>
+          <div class="req-text">Ward 7 near the temple · N05</div>
+          <div class="req-raw">मेरे घर में पानी भर गया है, 4 लोग हैं, बुजुर्ग माँ चल नहीं सकती, Ward 7 मंदिर के पास</div>
+          <div class="tags">
+            <span class="tag">REQ-03F98C4F</span><span class="tag">4 people</span>
+            <span class="tag">evacuation</span><span class="tag">shelter</span>
+            <span class="warn-chip">Elderly mother who cannot walk</span>
+          </div>
+        </button>
+
+        <button class="req-card crit" onclick="selectReq(this)">
+          <div class="rh">
+            <span class="badge badge-CRITICAL">CRITICAL</span>
+            <span class="lang-chip">Tamil</span>
+            <span class="conf-chip">91%</span>
+          </div>
+          <div class="req-text">Ward 3 Temple Street · N03</div>
+          <div class="req-raw">மாடியில் 3 குழந்தைகள் சிக்கியுள்ளனர், தண்ணீர் ஏறுகிறது</div>
+          <div class="tags">
+            <span class="tag">REQ-7B21A09C</span><span class="tag">3 people</span>
+            <span class="tag">rescue</span><span class="warn-chip">children</span>
+          </div>
+        </button>
+
+        <button class="req-card crit" onclick="selectReq(this)">
+          <div class="rh">
+            <span class="badge badge-CRITICAL">CRITICAL</span>
+            <span class="lang-chip">English</span>
+            <span class="conf-chip">88%</span>
+          </div>
+          <div class="req-text">Ward 1 Riverside · N02</div>
+          <div class="req-raw">Dialysis patient needs transport to hospital, water chest-high on our lane</div>
+          <div class="tags">
+            <span class="tag">REQ-C4D8E112</span><span class="tag">1 person</span>
+            <span class="tag">medical</span><span class="warn-chip">dialysis patient</span>
+          </div>
+        </button>
+
+        <button class="req-card high" onclick="selectReq(this)">
+          <div class="rh">
+            <span class="badge badge-HIGH">HIGH</span>
+            <span class="lang-chip">Mixed</span>
+            <span class="conf-chip">83%</span>
+          </div>
+          <div class="req-text">Ward 5 Market Road · N04</div>
+          <div class="req-raw">Shop ke upar 6 log fanse hain, khana paani khatam</div>
+          <div class="tags">
+            <span class="tag">REQ-9A33F7B0</span><span class="tag">6 people</span>
+            <span class="tag">food</span><span class="tag">water</span>
+          </div>
+        </button>
+
+        <button class="req-card high" onclick="selectReq(this)">
+          <div class="rh">
+            <span class="badge badge-HIGH">HIGH</span>
+            <span class="lang-chip">English</span>
+            <span class="conf-chip">79%</span>
+          </div>
+          <div class="req-text">Ward 9 Hospital Junction · N06</div>
+          <div class="req-raw">12 people sheltering at the school, need dry rations and blankets</div>
+          <div class="tags">
+            <span class="tag">REQ-18EE5C44</span><span class="tag">12 people</span>
+            <span class="tag">supplies</span>
+          </div>
+        </button>
+
+        <button class="req-card" onclick="selectReq(this)">
+          <div class="rh">
+            <span class="badge badge-MEDIUM">MEDIUM</span>
+            <span class="lang-chip">unknown</span>
+            <span class="conf-chip">41%</span>
+          </div>
+          <div class="req-text">Unknown location</div>
+          <div class="req-raw">help us water coming fast</div>
+          <div class="tags">
+            <span class="tag">REQ-F0E0FEC1</span><span class="tag">Count unknown</span>
+            <span class="warn-chip">REVIEW REQUIRED</span>
+          </div>
+        </button>
+      </div>
+
+      <div class="group">
+        <div class="group-head"><span>ASSIGNED</span><span>2</span><span class="rule"></span></div>
+        <div class="req-row">
+          <div class="req-row-main">
+            <div class="req-row-title">Ward 1 Riverside</div>
+            <div class="req-row-sub">REQ-C4D8E112 · 1 person · Rescue Boat 2</div>
+          </div>
+          <span class="status-chip st-ASSIGNED">ASSIGNED</span>
+        </div>
+        <div class="req-row">
+          <div class="req-row-main">
+            <div class="req-row-title">Ward 9 Hospital Junction</div>
+            <div class="req-row-sub">REQ-18EE5C44 · 12 people · Supply Team 5</div>
+          </div>
+          <span class="status-chip st-ASSIGNED">ASSIGNED</span>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="group-head"><span>SERVED</span><span>2</span><span class="rule"></span></div>
+        <div class="req-row">
+          <div class="req-row-main">
+            <div class="req-row-title">Ward 3 Temple Street</div>
+            <div class="req-row-sub">REQ-55C1B8A2 · 8 people · delivered to Govt School</div>
+          </div>
+          <span class="status-chip st-SERVED">SERVED</span>
+        </div>
+        <div class="req-row">
+          <div class="req-row-main">
+            <div class="req-row-title">Ward 1 Riverside</div>
+            <div class="req-row-sub">REQ-2F90DD71 · 20 people · supplies delivered</div>
+          </div>
+          <span class="status-chip st-SERVED">SERVED</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Resources ── -->
+    <div class="tab-body scroll" id="bodyRes">
+      <div class="fleet">
+        <div class="fleet-row"><span class="fleet-dot busy"></span><div class="fleet-main"><div class="fleet-name">Rescue Boat 1</div><div class="fleet-sub">Community Hall · assigned Ward 3</div></div><span class="fleet-cap">cap 8</span></div>
+        <div class="fleet-row"><span class="fleet-dot busy"></span><div class="fleet-main"><div class="fleet-name">Rescue Boat 2</div><div class="fleet-sub">Boat Jetty A · people aboard</div></div><span class="fleet-cap">cap 8</span></div>
+        <div class="fleet-row"><span class="fleet-dot busy"></span><div class="fleet-main"><div class="fleet-name">Rescue Boat 3</div><div class="fleet-sub">Boat Jetty B · assigned Ward 7</div></div><span class="fleet-cap">cap 6</span></div>
+        <div class="fleet-row"><span class="fleet-dot free"></span><div class="fleet-main"><div class="fleet-name">Rescue Boat 4</div><div class="fleet-sub">Govt School · available</div></div><span class="fleet-cap">cap 6</span></div>
+        <div class="fleet-row"><span class="fleet-dot busy"></span><div class="fleet-main"><div class="fleet-name">Supply Team 2</div><div class="fleet-sub">Ward 9 Hospital Junction · assigned</div></div><span class="fleet-cap">cap 20</span></div>
+        <div class="fleet-row"><span class="fleet-dot busy"></span><div class="fleet-main"><div class="fleet-name">Supply Team 5</div><div class="fleet-sub">District Control Room · on the way</div></div><span class="fleet-cap">cap 20</span></div>
+        <div class="fleet-row"><span class="fleet-dot free"></span><div class="fleet-main"><div class="fleet-name">Supply Team 1</div><div class="fleet-sub">District Control Room · available</div></div><span class="fleet-cap">cap 20</span></div>
+        <div class="fleet-row"><span class="fleet-dot free"></span><div class="fleet-main"><div class="fleet-name">Medical Unit 1</div><div class="fleet-sub">Ward 9 Hospital Junction · available</div></div><span class="fleet-cap">cap 4</span></div>
+      </div>
+    </div>
+
+    <div class="rail-foot">
+      <span class="audit-line" id="auditLine">3 awaiting approval · 49 assignments approved · 1 unassigned</span>
+      <button class="ghost-btn" onclick="planAll()">Plan all pending</button>
+    </div>
+  </div>
+</div>
+
+<!-- ───── RESULTS ───── -->
+<div class="res-view" id="resView">
+  <div class="res-head">
+    <span class="res-title">Results</span>
+    <span class="res-chip">synthetic district · simulated flood</span>
+  </div>
+  <div class="metrics-grid">
+    <div class="metric-card"><div class="mc-label">MEDIAN TIME TO DISPATCH</div><div class="mc-val">2.4<span> min</span></div><div class="mc-base">baseline 11 min by phone</div></div>
+    <div class="metric-card"><div class="mc-label">REQUESTS UNDERSTOOD</div><div class="mc-val">94<span>%</span></div><div class="mc-base">6% held for coordinator review</div></div>
+    <div class="metric-card"><div class="mc-label">REROUTE AFTER CLOSURE</div><div class="mc-val">1.1<span> s</span></div><div class="mc-base">43 active routes recalculated</div></div>
+    <div class="metric-card"><div class="mc-label">PEOPLE REACHED</div><div class="mc-val">187</div><div class="mc-base">across 49 approved assignments</div></div>
+  </div>
+</div>
+
+</div><!-- /body -->
+</div><!-- /app -->
+
+<script>
+/* ── District graph: the real nodes and edges from data/road_graph.json,
+      projected from lat/lng into the SVG viewBox. ── */
+const NODES = {
+  N01: { name: 'District Control Room',          x:  80, y: 310, kind: 'depot'    },
+  N02: { name: 'Ward 1 Riverside',               x: 726, y: 460, kind: 'ward'     },
+  N03: { name: 'Ward 3 Temple Street',           x: 468, y: 210, kind: 'ward'     },
+  N04: { name: 'Ward 5 Market Road',             x: 338, y: 560, kind: 'ward'     },
+  N05: { name: 'Ward 7 Old Town',                x: 920, y:  60, kind: 'ward'     },
+  N06: { name: 'Ward 9 Hospital Junction',       x: 306, y: 335, kind: 'hospital' },
+  N07: { name: 'Govt School (shelter site)',     x: 209, y: 160, kind: 'shelter'  },
+  N08: { name: 'Community Hall (shelter site)',  x: 597, y: 510, kind: 'shelter'  },
+  N09: { name: 'Bridge Road East End',           x: 662, y: 185, kind: 'bridge'   },
+  N10: { name: 'Bridge Road West End',           x: 371, y: 235, kind: 'bridge'   },
+  N11: { name: 'Boat Jetty A (Riverside)',       x: 791, y: 410, kind: 'jetty'    },
+  N12: { name: 'Boat Jetty B (East Bank)',       x: 759, y:  85, kind: 'jetty'    },
+};
+
+const EDGES = [
+  ['N01__N10','N01','N10',4,'Station Road'],
+  ['N01__N07','N01','N07',4,'School Lane'],
+  ['N01__N06','N01','N06',3,'Hospital Road'],
+  ['N06__N10','N06','N10',2,'Hospital Road'],
+  ['N03__N10','N03','N10',3,'Temple Street'],
+  ['N03__N07','N03','N07',3,'Temple Street'],
+  ['N09__N10','N10','N09',5,'Bridge Road'],
+  ['N05__N09','N09','N05',4,'Old Town Road'],
+  ['N09__N12','N09','N12',3,'East Bank Road'],
+  ['N02__N09','N09','N02',6,'Riverside Drive'],
+  ['N02__N11','N11','N02',2,'Riverside Drive'],
+  ['N02__N08','N08','N02',4,'Hall Road'],
+  ['N04__N08','N08','N04',5,'Market Road'],
+  ['N04__N06','N06','N04',4,'Market Road'],
+  ['N08__N11','N11','N08',5,'Jetty Road'],
+  ['N05__N12','N05','N12',4,'Old Town Jetty Lane'],
+  ['N02__N04','N02','N04',5,'Market Road'],
+];
+
+const NODE_FILL = {
+  depot:   '#0f172a', ward:   '#2563eb', hospital: '#dc2626',
+  shelter: '#16a34a', bridge: '#d97706', jetty:    '#0891b2',
+};
+
+let activeEdges = new Set(['N04__N08','N04__N06','N06__N10','N03__N10','N09__N12','N05__N12','N02__N11','N02__N08']);
+let closedEdges = new Set();
+
+function drawMap() {
+  const eg = document.getElementById('edges');
+  const ng = document.getElementById('nodes');
+  eg.innerHTML = ''; ng.innerHTML = '';
+
+  EDGES.forEach(([id, a, b, mins, name]) => {
+    const A = NODES[a], B = NODES[b];
+    const cls = closedEdges.has(id) ? 'closed' : (activeEdges.has(id) ? 'active' : '');
+
+    const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+    line.setAttribute('x1',A.x); line.setAttribute('y1',A.y);
+    line.setAttribute('x2',B.x); line.setAttribute('y2',B.y);
+    line.setAttribute('class','edge ' + cls);
+    eg.appendChild(line);
+
+    const hit = document.createElementNS('http://www.w3.org/2000/svg','line');
+    hit.setAttribute('x1',A.x); hit.setAttribute('y1',A.y);
+    hit.setAttribute('x2',B.x); hit.setAttribute('y2',B.y);
+    hit.setAttribute('class','edge-hit');
+    hit.addEventListener('click', () => {
+      const sel = document.getElementById('roadSelect');
+      if ([...sel.options].some(o => o.value === id)) { sel.value = id; closeRoad(); }
+    });
+    const title = document.createElementNS('http://www.w3.org/2000/svg','title');
+    title.textContent = name + ' · ' + mins + ' min · click to close';
+    hit.appendChild(title);
+    eg.appendChild(hit);
+
+    const t = document.createElementNS('http://www.w3.org/2000/svg','text');
+    t.setAttribute('x',(A.x+B.x)/2); t.setAttribute('y',(A.y+B.y)/2 - 5);
+    t.setAttribute('text-anchor','middle'); t.setAttribute('class','edge-lbl');
+    t.textContent = mins + 'm';
+    eg.appendChild(t);
+  });
+
+  Object.entries(NODES).forEach(([id, n]) => {
+    const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx',n.x); c.setAttribute('cy',n.y); c.setAttribute('r', 7);
+    c.setAttribute('fill', NODE_FILL[n.kind]);
+    c.setAttribute('stroke','#faf8f5'); c.setAttribute('stroke-width','2.5');
+    ng.appendChild(c);
+
+    const t = document.createElementNS('http://www.w3.org/2000/svg','text');
+    const left = n.x > 700;
+    t.setAttribute('x', n.x + (left ? -12 : 12));
+    t.setAttribute('y', n.y - 11);
+    t.setAttribute('text-anchor', left ? 'end' : 'start');
+    t.setAttribute('class','node-lbl');
+    t.textContent = n.name;
+    ng.appendChild(t);
+  });
+}
+
+/* ── Interactions ── */
+function showView(v) {
+  const cmd = v === 'cmd';
+  document.getElementById('cmdView').style.display = cmd ? 'grid' : 'none';
+  document.getElementById('resView').classList.toggle('show', !cmd);
+  document.getElementById('navCmd').classList.toggle('active', cmd);
+  document.getElementById('navRes').classList.toggle('active', !cmd);
+}
+
+function showTab(t) {
+  ['plans','reqs','res'].forEach(k => {
+    const cap = k === 'plans' ? 'Plans' : k === 'reqs' ? 'Reqs' : 'Res';
+    document.getElementById('body' + cap).classList.toggle('show', k === t);
+    document.getElementById('tab'  + cap).classList.toggle('active', k === t);
+  });
+}
+
+function selectReq(el) {
+  const wasSel = el.classList.contains('sel');
+  document.querySelectorAll('.req-card.sel').forEach(c => c.classList.remove('sel'));
+  if (!wasSel) el.classList.add('sel');
+}
+
+function togglePlan(id) {
+  const el = document.getElementById(id);
+  const wasOpen = el.classList.contains('open');
+  // Accordion: one plan expanded at a time keeps the rail scannable.
+  document.querySelectorAll('.plan.open').forEach(p => p.classList.remove('open'));
+  if (!wasOpen) el.classList.add('open');
+}
+
+function closeRoad() {
+  const sel  = document.getElementById('roadSelect');
+  if (!sel.value) return;
+  const id   = sel.value;
+  const name = sel.options[sel.selectedIndex].text.replace('★ ','').split(' · ')[0];
+
+  closedEdges.add(id);
+  activeEdges.delete(id);
+
+  // Bridge Road is the scripted demo closure: Boat 1 reroutes the long way.
+  if (id === 'N09__N10') {
+    document.getElementById('p1sub').textContent    = '5 people · via Market Road, Hospital Road, Temple Street (+5 min)';
+    document.getElementById('p1old').style.display  = 'inline';
+    document.getElementById('p1eta').textContent    = '19 min';
+    document.getElementById('p1eta').classList.add('late');
+    document.getElementById('p1timing').textContent = '19 min to reach them · 33 min to safety (+5 min from the closure)';
+    document.getElementById('p1why').className      = 'why-box why-amber';
+    document.getElementById('p1why').textContent    = 'Bridge Road is closed, so Boat 1 now goes round by Market Road — 5 minutes longer. The Ward 3 group is on a rooftop and stable, so the delay is acceptable.';
+  }
+
+  showTab('plans');
+  const bar = document.getElementById('closureBar');
+  bar.classList.add('show');
+  document.getElementById('closureText').textContent =
+    name + ' closed · ' + (id === 'N09__N10' ? '2 plans recalculated' : 'no active route affected');
+
+  const n = closedEdges.size;
+  const label = n + ' road' + (n === 1 ? '' : 's') + ' closed';
+  const chip = document.getElementById('chipClosed');
+  chip.style.display = 'inline-block';
+  chip.textContent = label;
+  document.getElementById('hpClosed').textContent = label;
+
+  sel.options[sel.selectedIndex].remove();
+  drawMap();
+}
+
+function approvePlan(id, ev) {
+  ev.stopPropagation();
+  const el = document.getElementById(id);
+  el.classList.remove('open', 'urgent', 'warn');
+  el.classList.add('calm');
+  const sub = el.querySelector('.plan-sub');
+  sub.textContent = sub.textContent.split(' · ')[0] + ' · dispatched, en route';
+  el.querySelector('.plan-actions').innerHTML =
+    '<button class="btn-deliver" onclick="markDelivered(\'' + id + '\', event)">Mark delivered</button>';
+  document.querySelectorAll('#bodyPlans .group')[1].appendChild(el);
+  bumpCounts(-1, 1, 0);
+}
+
+function markDelivered(id, ev) {
+  ev.stopPropagation();
+  const el = document.getElementById(id);
+  el.classList.remove('open', 'calm');
+  el.classList.add('done');
+  el.querySelector('.plan-eta').classList.add('ghost');
+  const sub = el.querySelector('.plan-sub');
+  sub.textContent = sub.textContent.split(' · ')[0] + ' · delivered';
+  el.querySelector('.plan-detail').innerHTML =
+    '<div class="detail-line"><b>Approved</b><span>coordinator · just now</span></div>';
+  document.querySelectorAll('#bodyPlans .group')[2].appendChild(el);
+  bumpCounts(0, -1, 1);
+}
+
+function bumpCounts(approval, progress, done) {
+  const set = (el, d) => { el.textContent = Math.max(0, parseInt(el.textContent, 10) + d); };
+  set(document.getElementById('nApproval'), approval);
+  set(document.getElementById('nProgress'), progress);
+  set(document.getElementById('nDone'), done);
+  document.getElementById('auditLine').textContent =
+    document.getElementById('nApproval').textContent +
+    ' awaiting approval · 49 assignments approved · 1 unassigned';
+}
+
+/* ── Intake ── */
+const SAMPLES = [
+  { text: 'मेरे घर में पानी भर गया है, 4 लोग हैं, बुजुर्ग माँ चल नहीं सकती, Ward 7 मंदिर के पास',
+    id: 'REQ-03F98C4F', conf: '95% confidence', fields: [
+      ['Language','Hindi'],['Urgency','CRITICAL'],['People','4'],
+      ['Location','Ward 7 near the temple'],['Node','N05'],
+      ['Needs','evacuation, shelter'],['Vulnerable','Elderly mother who cannot walk']] },
+  { text: 'மாடியில் 3 குழந்தைகள் சிக்கியுள்ளனர், தண்ணீர் ஏறுகிறது, Ward 3',
+    id: 'REQ-7B21A09C', conf: '91% confidence', fields: [
+      ['Language','Tamil'],['Urgency','CRITICAL'],['People','3'],
+      ['Location','Ward 3 Temple Street'],['Node','N03'],
+      ['Needs','rescue'],['Vulnerable','children']] },
+  { text: 'Dialysis patient needs transport to hospital, water chest-high on our lane, Ward 1',
+    id: 'REQ-C4D8E112', conf: '88% confidence', fields: [
+      ['Language','English'],['Urgency','CRITICAL'],['People','1'],
+      ['Location','Ward 1 Riverside'],['Node','N02'],
+      ['Needs','medical'],['Vulnerable','dialysis patient']] },
+  { text: 'Shop ke upar 6 log fanse hain, khana paani khatam, Ward 5 Market Road',
+    id: 'REQ-9A33F7B0', conf: '83% confidence', fields: [
+      ['Language','Mixed (Hindi/English)'],['Urgency','HIGH'],['People','6'],
+      ['Location','Ward 5 Market Road'],['Node','N04'],['Needs','food, water']] },
+  { text: '12 people sheltering at the school, need dry rations and blankets, Ward 9',
+    id: 'REQ-18EE5C44', conf: '79% confidence', fields: [
+      ['Language','English'],['Urgency','HIGH'],['People','12'],
+      ['Location','Ward 9 Hospital Junction'],['Node','N06'],['Needs','supplies']] },
+];
+
+let lastSample = 0;
+function fillSample(i) { lastSample = i; document.getElementById('intakeText').value = SAMPLES[i].text; }
+function loadAll()     { lastSample = 0; document.getElementById('intakeText').value = SAMPLES.map(s => s.text).join('  ⏎  '); }
+
+function processRequest() {
+  const s = SAMPLES[lastSample];
+  document.getElementById('exId').textContent   = s.id;
+  document.getElementById('exConf').textContent = s.conf;
+  document.getElementById('exFields').innerHTML = s.fields
+    .map(([k, v]) => '<span class="ef"><b>' + k + '</b><span>' + v + '</span></span>').join('');
+  document.getElementById('extractStrip').classList.add('show');
+  document.getElementById('intakeText').value = '';
+  showTab('reqs');
+}
+function hideExtract() { document.getElementById('extractStrip').classList.remove('show'); }
+function planAll()     { showTab('plans'); }
+function resetAll()    { location.reload(); }
+
+document.getElementById('intakeText').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || !e.shiftKey)) { e.preventDefault(); processRequest(); }
+});
+
+drawMap();
+</script>
+</body>
+</html>

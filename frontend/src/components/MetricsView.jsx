@@ -138,10 +138,10 @@ export default function MetricsView({ metrics, summary, requests, onRefresh, bus
             Fleet status
             <span className="card-sub">live from the backend</span>
           </div>
-          {Object.entries(summary ?? {}).length === 0 ? (
+          {Object.entries(summary?.by_type ?? {}).length === 0 ? (
             <div className="empty-sub">No resource data.</div>
           ) : (
-            Object.entries(summary).map(([type, s]) => {
+            Object.entries(summary.by_type).map(([type, s]) => {
               const pct = s.total ? Math.round((s.available / s.total) * 100) : 0
               return (
                 <div className="prog-row" key={type}>
